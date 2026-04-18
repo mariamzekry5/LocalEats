@@ -1,4 +1,4 @@
-import os, math, webbrowser
+import os, math, webbrowser, uuid
 from datetime import datetime
 from threading import Timer
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory
@@ -16,7 +16,8 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 
 users_db = {
     "ADMIN1": {"role": "Admin", "name": "System Admin", "status": "Active"},
-    "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active"}
+    "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active"},
+    "VEND101": {"role": "Vendor", "name": "Pizza House", "status": "Active"}
 }
 pending_vendors, pending_drivers = {}, {}
 
@@ -25,6 +26,14 @@ vendors = [
     {"name":"Koshary Beity","lat":30.6,"lon":30.4,"cuisine":"Egyptian","rating":4.8,"fee":10,"time":20},
     {"name":"Burger Zone","lat":31.2,"lon":29.9,"cuisine":"American","rating":3.9,"fee":25,"time":40}
 ]
+
+# Menu DB: { vendor_name: { "categories": ["Appetizers", ...], "items": { item_id: {...} } } }
+menu_db = {}
+
+def get_vendor_menu(vendor_name):
+    if vendor_name not in menu_db:
+        menu_db[vendor_name] = {"categories": [], "items": {}}
+    return menu_db[vendor_name]
 
 DECLINE_REASONS = [
     "Incomplete application details",
@@ -47,6 +56,7 @@ COMMON_STYLE = """
 .btn:hover{background:var(--le-dark);} .btn-secondary{background:#666;} .btn-secondary:hover{background:#4f4f4f;}
 .btn-danger{background:var(--danger);} .btn-danger:hover{background:var(--danger-dark);}
 .btn-outline{background:white;color:var(--le-green);border:1px solid var(--le-green);} .btn-outline:hover{background:var(--le-light);}
+.btn-warning{background:#f57c00;color:white;} .btn-warning:hover{background:#e65100;}
 .btn-sm{padding:8px 12px;font-size:13px;border-radius:8px;} .full-width{width:100%;} .btn-row{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;}
 input,select,textarea{width:100%;padding:12px;margin:10px 0;border:1px solid #ddd;border-radius:8px;font-size:14px;font-family:inherit;}
 label{font-size:12px;color:var(--muted);display:block;text-align:left;margin-top:10px;}
@@ -60,6 +70,7 @@ table{width:100%;border-collapse:collapse;} th,td{padding:14px 12px;border-botto
 th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-spacing:.3px;}
 .badge{display:inline-block;padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700;} .badge-pending{background:#fff3e0;color:#e65100;}
 .badge-live{background:#e8f5e9;color:#1b5e20;} .badge-customer{background:#e3f2fd;color:#0d47a1;} .badge-vendor{background:#f3e5f5;color:#6a1b9a;} .badge-driver{background:#fff8e1;color:#8d6e00;}
+.badge-instock{background:#e8f5e9;color:#1b5e20;} .badge-outofstock{background:#ffebee;color:#c62828;}
 .info-list{display:grid;gap:14px;} .info-item{background:#fafcfa;border:1px solid var(--border);border-radius:12px;padding:14px;} .info-label{font-size:12px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.3px;} .info-value{font-size:15px;font-weight:600;word-break:break-word;}
 .preview-box{border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#fafafa;min-height:320px;} .preview-frame{width:100%;height:520px;border:none;background:white;} .preview-image{width:100%;max-height:520px;object-fit:contain;display:block;background:white;}
 .actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:20px;} .empty-state{text-align:center;padding:34px 16px;color:var(--muted);border:1px dashed var(--border);border-radius:14px;background:#fcfdfc;}
@@ -68,7 +79,33 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .section-title{margin:30px 0 12px;}
 .browse-wrap{display:flex;gap:20px;align-items:flex-start;} .browse-sidebar{width:260px;padding:20px;background:white;border-radius:16px;box-shadow:var(--card-shadow);}
 .browse-content{flex:1;} .browse-card{background:white;padding:20px;border-radius:14px;margin-bottom:15px;box-shadow:0 5px 15px rgba(0,0,0,0.05);}
-@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar{width:100%;}}
+/* Menu management styles */
+.menu-wrap{display:flex;gap:20px;align-items:flex-start;}
+.menu-sidebar{width:240px;flex-shrink:0;background:white;border-radius:16px;box-shadow:var(--card-shadow);padding:20px;}
+.menu-content{flex:1;}
+.category-item{padding:10px 14px;border-radius:10px;cursor:pointer;font-size:14px;font-weight:600;margin-bottom:6px;text-decoration:none;display:block;color:var(--text);}
+.category-item:hover{background:var(--le-light);}
+.category-item.active{background:var(--le-light);color:var(--le-dark);}
+.menu-item-row{background:white;border-radius:14px;box-shadow:0 4px 12px rgba(0,0,0,0.05);padding:16px 20px;display:flex;align-items:center;gap:16px;margin-bottom:12px;}
+.menu-item-img{width:60px;height:60px;border-radius:10px;object-fit:cover;background:#f0f0f0;flex-shrink:0;}
+.menu-item-img-placeholder{width:60px;height:60px;border-radius:10px;background:#e8f5e9;display:flex;align-items:center;justify-content:center;font-size:22px;flex-shrink:0;}
+.menu-item-info{flex:1;}
+.menu-item-name{font-weight:700;font-size:15px;margin-bottom:3px;}
+.menu-item-price{color:var(--le-dark);font-weight:700;font-size:14px;}
+.menu-item-desc{color:var(--muted);font-size:13px;margin-top:2px;}
+.menu-item-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+.out-of-stock-row{opacity:0.55;}
+/* Customer menu styles */
+.cust-category{margin-bottom:28px;}
+.cust-category-title{font-size:17px;font-weight:800;color:var(--le-dark);margin-bottom:12px;padding-bottom:6px;border-bottom:2px solid var(--le-light);}
+.cust-item{background:white;border-radius:12px;padding:14px 16px;margin-bottom:10px;display:flex;align-items:center;gap:14px;box-shadow:0 3px 8px rgba(0,0,0,0.04);}
+.cust-item.oos{opacity:0.5;}
+.cust-item-img{width:54px;height:54px;border-radius:8px;object-fit:cover;background:#f0f0f0;flex-shrink:0;}
+.cust-item-img-placeholder{width:54px;height:54px;border-radius:8px;background:#e8f5e9;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;}
+.cust-item-name{font-weight:700;font-size:14px;}
+.cust-item-price{color:var(--le-dark);font-weight:700;font-size:13px;margin-top:2px;}
+.cust-item-desc{color:var(--muted);font-size:12px;margin-top:2px;}
+@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
 </style>
 """
 
@@ -220,6 +257,246 @@ def decline_driver(dname):
     del pending_drivers[dname]
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Driver application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p><strong>Reason:</strong> {reason}</p><p>No live driver account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
 
+# ─────────────────────────────────────────────
+# MENU MANAGEMENT — VENDOR ROUTES
+# ─────────────────────────────────────────────
+
+@app.route('/vendor/menu')
+def vendor_menu():
+    uid = request.args.get('uid', '')
+    name = request.args.get('name', 'Vendor')
+    # Resolve vendor's restaurant name from users_db
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    active_cat = request.args.get('cat', '')
+
+    menu = get_vendor_menu(restaurant_name)
+    categories = menu['categories']
+    items = menu['items']
+
+    # Default to first category if none selected
+    if not active_cat and categories:
+        active_cat = categories[0]
+
+    # Build category sidebar
+    cat_links = ""
+    for cat in categories:
+        active_cls = "active" if cat == active_cat else ""
+        cat_links += f'<a class="category-item {active_cls}" href="/vendor/menu?uid={uid}&name={name}&cat={cat}">{cat}</a>'
+
+    # Build items for active category
+    items_html = ""
+    cat_items = [(iid, item) for iid, item in items.items() if item['category'] == active_cat]
+    if cat_items:
+        for iid, item in cat_items:
+            oos_cls = "out-of-stock-row" if not item['in_stock'] else ""
+            stock_badge = '<span class="badge badge-instock">In stock</span>' if item['in_stock'] else '<span class="badge badge-outofstock">Out of stock</span>'
+            toggle_label = "Mark Out of Stock" if item['in_stock'] else "Mark In Stock"
+            toggle_cls = "btn-warning" if item['in_stock'] else "btn"
+            img_html = f'<img src="/uploads/{item["image"]}" class="menu-item-img" alt="{item["name"]}">' if item.get('image') else f'<div class="menu-item-img-placeholder">🍽️</div>'
+            desc_html = f'<div class="menu-item-desc">{item["description"]}</div>' if item.get('description') else ''
+            items_html += f"""
+            <div class="menu-item-row {oos_cls}">
+                {img_html}
+                <div class="menu-item-info">
+                    <div class="menu-item-name">{item['name']}</div>
+                    <div class="menu-item-price">{item['price']} EGP</div>
+                    {desc_html}
+                </div>
+                <div class="menu-item-actions">
+                    {stock_badge}
+                    <a class="btn btn-sm btn-outline" href="/vendor/menu/edit/{iid}?uid={uid}&name={name}&cat={active_cat}">Edit</a>
+                    <a class="btn btn-sm {toggle_cls}" href="/vendor/menu/toggle/{iid}?uid={uid}&name={name}&cat={active_cat}">{toggle_label}</a>
+                    <a class="btn btn-sm btn-danger" href="/vendor/menu/delete/{iid}?uid={uid}&name={name}&cat={active_cat}" onclick="return confirm('Delete this item?')">Delete</a>
+                </div>
+            </div>"""
+    else:
+        items_html = f'<div class="empty-state">No items in this category yet. Add one below.</div>'
+
+    # Add item form (only if there are categories)
+    add_item_form = ""
+    if categories:
+        cat_options = "".join([f'<option value="{c}" {"selected" if c == active_cat else ""}>{c}</option>' for c in categories])
+        add_item_form = f"""
+        <div class="card">
+            <h3>Add New Item{f' to {active_cat}' if active_cat else ''}</h3>
+            <form action="/vendor/menu/add_item" method="POST" enctype="multipart/form-data">
+                <input type="hidden" name="uid" value="{uid}">
+                <input type="hidden" name="name" value="{name}">
+                <label>Category</label>
+                <select name="category">{cat_options}</select>
+                <label>Item Name</label>
+                <input type="text" name="item_name" placeholder="e.g. Margherita Pizza" required>
+                <label>Price (EGP)</label>
+                <input type="number" name="price" placeholder="e.g. 120" min="0" step="0.5" required>
+                <label>Description (optional)</label>
+                <textarea name="description" rows="2" placeholder="Brief description of the item" style="resize:vertical;"></textarea>
+                <label>Item Photo (optional, JPG/PNG)</label>
+                <input type="file" name="item_image" accept=".jpg,.jpeg,.png">
+                <button type="submit" class="btn" style="margin-top:12px;">Add Item</button>
+            </form>
+        </div>"""
+
+    # Add category form
+    add_cat_form = f"""
+    <form action="/vendor/menu/add_category" method="POST" style="display:flex;gap:10px;margin-top:16px;">
+        <input type="hidden" name="uid" value="{uid}">
+        <input type="hidden" name="name" value="{name}">
+        <input type="text" name="category_name" placeholder="New category name" required style="margin:0;flex:1;">
+        <button type="submit" class="btn btn-outline">+ Add</button>
+    </form>"""
+
+    no_cat_msg = ""
+    if not categories:
+        no_cat_msg = '<div class="empty-state" style="margin-bottom:20px;">No categories yet. Add your first category to get started.</div>'
+
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Menu Management</h1>
+                <div class="muted">{restaurant_name} &nbsp;•&nbsp; User ID: {uid}</div>
+            </div>
+            <div style="display:flex;gap:10px;">
+                <a href="/vendor?uid={uid}&name={name}" class="btn btn-secondary">Back to Dashboard</a>
+            </div>
+        </div>
+        <div class="menu-wrap">
+            <div class="menu-sidebar">
+                <h3 style="margin-bottom:14px;">Categories</h3>
+                {cat_links if cat_links else '<div class="muted" style="font-size:13px;">No categories yet.</div>'}
+                {add_cat_form}
+            </div>
+            <div class="menu-content">
+                {no_cat_msg}
+                {'<div class="card"><h3>Items in ' + active_cat + '</h3>' + items_html + '</div>' if active_cat else ''}
+                {add_item_form}
+            </div>
+        </div>
+    </div>""")
+
+@app.route('/vendor/menu/add_category', methods=['POST'])
+def vendor_menu_add_category():
+    uid = request.form.get('uid', '')
+    name = request.form.get('name', 'Vendor')
+    cat_name = request.form.get('category_name', '').strip()
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    if cat_name:
+        menu = get_vendor_menu(restaurant_name)
+        if cat_name not in menu['categories']:
+            menu['categories'].append(cat_name)
+    return redirect(url_for('vendor_menu', uid=uid, name=name, cat=cat_name))
+
+@app.route('/vendor/menu/add_item', methods=['POST'])
+def vendor_menu_add_item():
+    uid = request.form.get('uid', '')
+    name = request.form.get('name', 'Vendor')
+    category = request.form.get('category', '').strip()
+    item_name = request.form.get('item_name', '').strip()
+    price = request.form.get('price', '0').strip()
+    description = request.form.get('description', '').strip()
+    image_file = request.files.get('item_image')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+
+    if not item_name or not category: return redirect(url_for('vendor_menu', uid=uid, name=name))
+
+    menu = get_vendor_menu(restaurant_name)
+    item_id = str(uuid.uuid4())[:8]
+    saved_image = None
+    if image_file and allowed_file(image_file.filename):
+        img_filename = secure_filename(f"menu_{restaurant_name}_{item_id}_{image_file.filename}")
+        image_file.save(os.path.join(app.config['UPLOAD_FOLDER'], img_filename))
+        saved_image = img_filename
+
+    menu['items'][item_id] = {
+        "name": item_name,
+        "price": price,
+        "description": description,
+        "category": category,
+        "in_stock": True,
+        "image": saved_image
+    }
+    return redirect(url_for('vendor_menu', uid=uid, name=name, cat=category))
+
+@app.route('/vendor/menu/edit/<item_id>', methods=['GET', 'POST'])
+def vendor_menu_edit_item(item_id):
+    uid = request.args.get('uid', '') or request.form.get('uid', '')
+    name = request.args.get('name', 'Vendor') or request.form.get('name', 'Vendor')
+    cat = request.args.get('cat', '') or request.form.get('cat', '')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    menu = get_vendor_menu(restaurant_name)
+    item = menu['items'].get(item_id)
+    if not item: return redirect(url_for('vendor_menu', uid=uid, name=name))
+
+    if request.method == 'POST':
+        item['name'] = request.form.get('item_name', item['name']).strip()
+        item['price'] = request.form.get('price', item['price']).strip()
+        item['description'] = request.form.get('description', item.get('description', '')).strip()
+        new_cat = request.form.get('category', item['category']).strip()
+        item['category'] = new_cat
+        image_file = request.files.get('item_image')
+        if image_file and allowed_file(image_file.filename):
+            img_filename = secure_filename(f"menu_{restaurant_name}_{item_id}_{image_file.filename}")
+            image_file.save(os.path.join(app.config['UPLOAD_FOLDER'], img_filename))
+            item['image'] = img_filename
+        return redirect(url_for('vendor_menu', uid=uid, name=name, cat=new_cat))
+
+    cat_options = "".join([f'<option value="{c}" {"selected" if c == item["category"] else ""}>{c}</option>' for c in menu['categories']])
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="card" style="max-width:560px;margin:40px auto;">
+        <h2>Edit Item</h2>
+        <form action="/vendor/menu/edit/{item_id}" method="POST" enctype="multipart/form-data">
+            <input type="hidden" name="uid" value="{uid}">
+            <input type="hidden" name="name" value="{name}">
+            <input type="hidden" name="cat" value="{cat}">
+            <label>Category</label>
+            <select name="category">{cat_options}</select>
+            <label>Item Name</label>
+            <input type="text" name="item_name" value="{item['name']}" required>
+            <label>Price (EGP)</label>
+            <input type="number" name="price" value="{item['price']}" min="0" step="0.5" required>
+            <label>Description</label>
+            <textarea name="description" rows="2" style="resize:vertical;">{item.get('description','')}</textarea>
+            <label>Replace Photo (optional)</label>
+            <input type="file" name="item_image" accept=".jpg,.jpeg,.png">
+            <div style="display:flex;gap:12px;margin-top:14px;">
+                <button type="submit" class="btn">Save Changes</button>
+                <a href="/vendor/menu?uid={uid}&name={name}&cat={cat}" class="btn btn-secondary">Cancel</a>
+            </div>
+        </form>
+    </div>""")
+
+@app.route('/vendor/menu/delete/<item_id>')
+def vendor_menu_delete_item(item_id):
+    uid = request.args.get('uid', '')
+    name = request.args.get('name', 'Vendor')
+    cat = request.args.get('cat', '')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    menu = get_vendor_menu(restaurant_name)
+    if item_id in menu['items']:
+        del menu['items'][item_id]
+    return redirect(url_for('vendor_menu', uid=uid, name=name, cat=cat))
+
+@app.route('/vendor/menu/toggle/<item_id>')
+def vendor_menu_toggle_stock(item_id):
+    uid = request.args.get('uid', '')
+    name = request.args.get('name', 'Vendor')
+    cat = request.args.get('cat', '')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    menu = get_vendor_menu(restaurant_name)
+    if item_id in menu['items']:
+        menu['items'][item_id]['in_stock'] = not menu['items'][item_id]['in_stock']
+    return redirect(url_for('vendor_menu', uid=uid, name=name, cat=cat))
+
+# ─────────────────────────────────────────────
+# CUSTOMER ROUTES
+# ─────────────────────────────────────────────
+
 @app.route('/customer', methods=['GET', 'POST'])
 def customer_dashboard():
     uid, name = request.args.get('uid', 'C303'), request.args.get('name', 'Customer')
@@ -234,17 +511,90 @@ def customer_dashboard():
         if fee and v["fee"] > float(fee): continue
         if time and v["time"] > float(time): continue
         results.append((v, round(dist, 2)))
-    vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><button class="btn">Select Restaurant</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
+    vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button class="btn">View Menu</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
     return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
 
-@app.route('/restaurant/<name>')
-def restaurant(name):
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="browse-content"><div class="browse-card"><h2>{name}</h2><p>Restaurant page</p><a href="/customer"><button class="btn">Back</button></a></div></div></div>""")
+@app.route('/restaurant/<rname>')
+def restaurant(rname):
+    cuid = request.args.get('cuid', '')
+    cname = request.args.get('cname', 'Customer')
+    menu = get_vendor_menu(rname)
+    categories = menu['categories']
+    items = menu['items']
+
+    if not categories:
+        menu_section = '<div class="empty-state">This restaurant hasn\'t added their menu yet. Check back soon!</div>'
+    else:
+        menu_section = ""
+        for cat in categories:
+            cat_items = [(iid, item) for iid, item in items.items() if item['category'] == cat]
+            if not cat_items:
+                continue
+            items_html = ""
+            for iid, item in cat_items:
+                oos_cls = "oos" if not item['in_stock'] else ""
+                oos_label = '<span style="font-size:11px;background:#ffebee;color:#c62828;padding:2px 8px;border-radius:999px;margin-left:6px;">Unavailable</span>' if not item['in_stock'] else ''
+                img_html = f'<img src="/uploads/{item["image"]}" class="cust-item-img" alt="{item["name"]}">' if item.get('image') else '<div class="cust-item-img-placeholder">🍽️</div>'
+                desc_html = f'<div class="cust-item-desc">{item["description"]}</div>' if item.get('description') else ''
+                items_html += f"""
+                <div class="cust-item {oos_cls}">
+                    {img_html}
+                    <div>
+                        <div class="cust-item-name">{item['name']}{oos_label}</div>
+                        <div class="cust-item-price">{item['price']} EGP</div>
+                        {desc_html}
+                    </div>
+                </div>"""
+            menu_section += f'<div class="cust-category"><div class="cust-category-title">{cat}</div>{items_html}</div>'
+
+    back_url = f'/customer?uid={cuid}&name={cname}' if cuid else '/customer'
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">{rname}</h1>
+                <div class="muted">Menu</div>
+            </div>
+            <a href="{back_url}" class="btn btn-secondary">Back</a>
+        </div>
+        <div class="browse-content">
+            {menu_section}
+        </div>
+    </div>""")
+
+# ─────────────────────────────────────────────
+# VENDOR & DRIVER DASHBOARDS
+# ─────────────────────────────────────────────
 
 @app.route('/vendor')
 def vendor_dashboard():
     uid, name = request.args.get('uid'), request.args.get('name', 'Vendor')
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Storefront</div><h3>Welcome, {name}</h3><p class="subtitle">User ID: {uid}</p><p>Status: Verified</p><a href="/" class="btn full-width">Logout</a></div>""")
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+    menu = get_vendor_menu(restaurant_name)
+    item_count = len(menu['items'])
+    cat_count = len(menu['categories'])
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Vendor Dashboard</h1>
+                <div class="muted">{restaurant_name} &nbsp;•&nbsp; User ID: {uid}</div>
+            </div>
+            <a href="/" class="btn btn-secondary">Logout</a>
+        </div>
+        <div class="stats">
+            <div class="stat-box"><div class="stat-label">Menu Categories</div><div class="stat-value">{cat_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Menu Items</div><div class="stat-value">{item_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Status</div><div class="stat-value" style="font-size:18px;color:var(--le-green);">Active</div></div>
+        </div>
+        <div class="card">
+            <h3>Quick Actions</h3>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;">
+                <a href="/vendor/menu?uid={uid}&name={name}" class="btn">Manage Menu</a>
+            </div>
+        </div>
+    </div>""")
 
 @app.route('/driver')
 def driver_dashboard():
