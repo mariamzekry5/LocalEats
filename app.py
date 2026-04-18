@@ -1,4 +1,4 @@
-import os, webbrowser
+import os, math, webbrowser
 from datetime import datetime
 from threading import Timer
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory
@@ -9,12 +9,22 @@ UPLOAD_FOLDER = 'uploads'; ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}; a
 
 def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 def file_extension(filename): return filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+def calculate_distance(lat1, lon1, lat2, lon2):
+    R = 6371; dlat = math.radians(lat2 - lat1); dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 users_db = {
     "ADMIN1": {"role": "Admin", "name": "System Admin", "status": "Active"},
     "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active"}
 }
 pending_vendors, pending_drivers = {}, {}
+
+vendors = [
+    {"name":"Pizza House","lat":30.51,"lon":30.52,"cuisine":"Italian","rating":4.5,"fee":20,"time":30},
+    {"name":"Koshary Beity","lat":30.6,"lon":30.4,"cuisine":"Egyptian","rating":4.8,"fee":10,"time":20},
+    {"name":"Burger Zone","lat":31.2,"lon":29.9,"cuisine":"American","rating":3.9,"fee":25,"time":40}
+]
 
 DECLINE_REASONS = [
     "Incomplete application details",
@@ -56,7 +66,9 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .success-box{border:2px solid #c8e6c9;background:#f1f8f2;border-radius:12px;padding:18px;margin-top:12px;} .danger-box{border:2px solid #ffcdd2;background:#fff5f5;border-radius:12px;padding:18px;margin-top:12px;}
 .choice-card{display:block;padding:18px;border:1px solid var(--border);border-radius:14px;text-decoration:none;color:var(--text);text-align:left;background:#fcfdfc;} .choice-card:hover{background:var(--le-light);}
 .section-title{margin:30px 0 12px;}
-@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar{flex-direction:column;align-items:flex-start;} table{font-size:13px;}}
+.browse-wrap{display:flex;gap:20px;align-items:flex-start;} .browse-sidebar{width:260px;padding:20px;background:white;border-radius:16px;box-shadow:var(--card-shadow);}
+.browse-content{flex:1;} .browse-card{background:white;padding:20px;border-radius:14px;margin-bottom:15px;box-shadow:0 5px 15px rgba(0,0,0,0.05);}
+@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar{width:100%;}}
 </style>
 """
 
@@ -74,12 +86,11 @@ def render_file_preview(filename):
     if ext in ['png', 'jpg', 'jpeg']: return f'<div class="preview-box"><img src="{file_url}" alt="Uploaded document" class="preview-image"></div>'
     return f'<div class="preview-box" style="padding:20px;"><p>Preview not available.</p><a class="btn btn-outline btn-sm" href="{file_url}" target="_blank">Open File</a></div>'
 
-def decline_reason_options():
-    return "".join([f'<option value="{r}">{r}</option>' for r in DECLINE_REASONS])
+def decline_reason_options(): return "".join([f'<option value="{r}">{r}</option>' for r in DECLINE_REASONS])
 
 @app.route('/')
 def login_page():
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Login</h2><p class="subtitle">Sign in with your user ID</p><form action="/auth" method="POST"><input type="text" name="uid" placeholder="Enter ID (Admin: ADMIN1)" required><button type="submit" class="btn full-width">Sign In</button></form><p style="font-size:13px;margin-top:20px;">Want to join LocalEats? <a href="/register" style="color:var(--le-green);text-decoration:none;font-weight:bold;">Register</a></p></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Login</h2><p class="subtitle">Sign in with your user ID</p><form action="/auth" method="POST"><input type="text" name="uid" placeholder="Enter ID (Admin: ADMIN1, Customer: C303)" required><button type="submit" class="btn full-width">Sign In</button></form><p style="font-size:13px;margin-top:20px;">Want to join LocalEats? <a href="/register" style="color:var(--le-green);text-decoration:none;font-weight:bold;">Register</a></p></div>""")
 
 @app.route('/auth', methods=['POST'])
 def auth():
@@ -111,6 +122,7 @@ def submit_vendor_app():
     if file and allowed_file(file.filename):
         filename = secure_filename(f"{vname}_{file.filename}"); file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
         pending_vendors[vname] = {"name": vname, "address": vaddress, "file": filename, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Vendor", "status": "Inactive - Pending Admin Approval"}
+        vendors.append({"name": vname, "lat": 30.5, "lon": 30.5, "cuisine": "Various", "rating": 4.0, "fee": 20, "time": 30})
         return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div style="border:2px dashed orange;padding:20px;border-radius:10px;background:#fffdf5;"><h3 style="color:orange;">Vendor Application Pending</h3><p>Documents for <strong>{vname}</strong> are being reviewed.</p><p style="font-size:12px;">The file <b>{filename}</b> was successfully uploaded.</p><p style="font-size:12px;">Your profile will remain inactive until approved by an Admin.</p></div><a href="/" class="btn full-width">Return Home</a></div>""")
     return "Invalid File Type."
 
@@ -170,14 +182,12 @@ def admin_driver_detail(dname):
 
 @app.route('/decline_form/vendor/<vname>')
 def decline_vendor_form(vname):
-    data = pending_vendors.get(vname)
-    if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
+    if vname not in pending_vendors: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Decline Vendor</div><h3>Select a reason</h3><form action="/decline/vendor/{vname}" method="POST"><label>Standardised Reason for Decline</label><select name="reason" required><option value="">Choose a reason</option>{decline_reason_options()}</select><button type="submit" class="btn btn-danger full-width">Confirm Decline</button></form><div style="margin-top:12px;"><a href="/admin/vendor/{vname}" class="btn btn-secondary">Cancel</a></div></div>""")
 
 @app.route('/decline_form/driver/<dname>')
 def decline_driver_form(dname):
-    data = pending_drivers.get(dname)
-    if not data: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
+    if dname not in pending_drivers: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Decline Driver</div><h3>Select a reason</h3><form action="/decline/driver/{dname}" method="POST"><label>Standardised Reason for Decline</label><select name="reason" required><option value="">Choose a reason</option>{decline_reason_options()}</select><button type="submit" class="btn btn-danger full-width">Confirm Decline</button></form><div style="margin-top:12px;"><a href="/admin/driver/{dname}" class="btn btn-secondary">Cancel</a></div></div>""")
 
 @app.route('/approve/vendor/<vname>')
@@ -196,7 +206,7 @@ def approve_driver(dname):
 
 @app.route('/decline/vendor/<vname>', methods=['POST'])
 def decline_vendor(vname):
-    data = pending_vendors.get(vname); reason = request.form.get('reason', '').strip()
+    data, reason = pending_vendors.get(vname), request.form.get('reason', '').strip()
     if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
     if reason not in DECLINE_REASONS: return "<h3>Invalid decline reason.</h3><a href='/admin'>Back to Admin</a>"
     del pending_vendors[vname]
@@ -204,16 +214,32 @@ def decline_vendor(vname):
 
 @app.route('/decline/driver/<dname>', methods=['POST'])
 def decline_driver(dname):
-    data = pending_drivers.get(dname); reason = request.form.get('reason', '').strip()
+    data, reason = pending_drivers.get(dname), request.form.get('reason', '').strip()
     if not data: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
     if reason not in DECLINE_REASONS: return "<h3>Invalid decline reason.</h3><a href='/admin'>Back to Admin</a>"
     del pending_drivers[dname]
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Driver application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p><strong>Reason:</strong> {reason}</p><p>No live driver account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
 
-@app.route('/customer')
+@app.route('/customer', methods=['GET', 'POST'])
 def customer_dashboard():
-    uid, name = request.args.get('uid'), request.args.get('name', 'Customer')
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Customer</div><h3>Welcome, {name}</h3><p class="subtitle">User ID: {uid}</p><p>Status: Active</p><a href="/" class="btn full-width">Logout</a></div>""")
+    uid, name = request.args.get('uid', 'C303'), request.args.get('name', 'Customer')
+    user_lat, user_lon = 30.5, 30.5
+    cuisine, rating, fee, time = request.form.get('cuisine'), request.form.get('rating'), request.form.get('fee'), request.form.get('time')
+    results = []
+    for v in vendors:
+        dist = calculate_distance(user_lat, user_lon, v["lat"], v["lon"])
+        if dist > 15: continue
+        if cuisine and cuisine.lower() not in v["cuisine"].lower(): continue
+        if rating and v["rating"] < float(rating): continue
+        if fee and v["fee"] > float(fee): continue
+        if time and v["time"] > float(time): continue
+        results.append((v, round(dist, 2)))
+    vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><button class="btn">Select Restaurant</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
+
+@app.route('/restaurant/<name>')
+def restaurant(name):
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="browse-content"><div class="browse-card"><h2>{name}</h2><p>Restaurant page</p><a href="/customer"><button class="btn">Back</button></a></div></div></div>""")
 
 @app.route('/vendor')
 def vendor_dashboard():
@@ -230,4 +256,3 @@ def open_browser(): webbrowser.open_new("http://127.0.0.1:5000")
 if __name__ == '__main__':
     Timer(1.5, open_browser).start()
     app.run(port=5000, debug=False)
-    
