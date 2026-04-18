@@ -3,6 +3,9 @@ from datetime import datetime
 from threading import Timer
 from flask import Flask, render_template_string, request, redirect, url_for, send_from_directory
 from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash as _gph, check_password_hash
+# pbkdf2 is available on all Python builds; scrypt is not (Py 3.9 on macOS lacks hashlib.scrypt)
+def generate_password_hash(password): return _gph(password, method="pbkdf2:sha256")
 
 app = Flask(__name__); app.secret_key = "localeats_final_sprint1"
 UPLOAD_FOLDER = 'uploads'; ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}; app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER; os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -15,11 +18,15 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 users_db = {
-    "ADMIN1": {"role": "Admin", "name": "System Admin", "status": "Active"},
-    "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active"},
-    "VEND101": {"role": "Vendor", "name": "Pizza House", "status": "Active"}
+    "ADMIN1": {"role": "Admin", "name": "System Admin", "status": "Active", "password": generate_password_hash("admin123")},
+    "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active", "password": generate_password_hash("cust123")},
+    "VEND101": {"role": "Vendor", "name": "Pizza House", "status": "Active", "password": generate_password_hash("vendor123")}
 }
 pending_vendors, pending_drivers = {}, {}
+
+# Cart storage: { customer_uid: {"vendor": <vendor_name>, "items": { item_id: {name, price, qty, image} } } }
+carts = {}
+TAX_RATE = 0.14  # 14% VAT (FR-23)
 
 vendors = [
     {"name":"Pizza House","lat":30.51,"lon":30.52,"cuisine":"Italian","rating":4.5,"fee":20,"time":30},
@@ -105,6 +112,19 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .cust-item-name{font-weight:700;font-size:14px;}
 .cust-item-price{color:var(--le-dark);font-weight:700;font-size:13px;margin-top:2px;}
 .cust-item-desc{color:var(--muted);font-size:12px;margin-top:2px;}
+/* Cart styles */
+.cart-line{display:flex;align-items:center;gap:14px;padding:14px 0;border-bottom:1px solid var(--border);}
+.cart-line:last-child{border-bottom:none;}
+.cart-line-img{width:54px;height:54px;border-radius:8px;object-fit:cover;flex-shrink:0;background:#f0f0f0;}
+.cart-line-img-placeholder{width:54px;height:54px;border-radius:8px;background:#e8f5e9;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;}
+.cart-line-info{flex:1;}
+.cart-line-name{font-weight:700;font-size:14px;}
+.cart-line-price{color:var(--le-dark);font-weight:700;font-size:13px;margin-top:2px;}
+.cart-qty-form{display:flex;align-items:center;gap:6px;}
+.cart-qty-form input[type=number]{width:60px;margin:0;padding:6px 8px;text-align:center;}
+.cart-line-total{font-weight:800;min-width:90px;text-align:right;color:var(--le-dark);}
+.totals-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;}
+.totals-row.grand{border-top:2px solid var(--border);padding-top:14px;margin-top:8px;font-size:17px;font-weight:800;color:var(--le-dark);}
 @media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
 </style>
 """
@@ -117,6 +137,31 @@ def next_id(prefix):
             except ValueError: pass
     return f"{prefix}{max_num + 1}"
 
+def find_vendor_by_uid(uid):
+    """Return the seeded vendor dict for a vendor user_id, or None."""
+    user = users_db.get(uid)
+    if not user or user.get("role") != "Vendor": return None
+    for v in vendors:
+        if v["name"] == user["name"]: return v
+    return None
+
+def cart_totals(cart):
+    """Calculate subtotal, tax, delivery fee, total for a cart. FR-23."""
+    subtotal = sum(float(it["price"]) * it["qty"] for it in cart["items"].values())
+    delivery_fee = 0.0
+    for v in vendors:
+        if v["name"] == cart.get("vendor"):
+            delivery_fee = float(v.get("fee", 0)); break
+    tax = round(subtotal * TAX_RATE, 2)
+    total = round(subtotal + tax + delivery_fee, 2)
+    return round(subtotal, 2), tax, round(delivery_fee, 2), total
+
+def cart_count(uid):
+    """Total number of items (sum of qty) in user's cart."""
+    c = carts.get(uid)
+    if not c: return 0
+    return sum(it["qty"] for it in c["items"].values())
+
 def render_file_preview(filename):
     ext, file_url = file_extension(filename), url_for('uploaded_file', filename=filename)
     if ext == 'pdf': return f'<div class="preview-box"><iframe src="{file_url}" class="preview-frame"></iframe></div>'
@@ -127,40 +172,69 @@ def decline_reason_options(): return "".join([f'<option value="{r}">{r}</option>
 
 @app.route('/')
 def login_page():
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Login</h2><p class="subtitle">Sign in with your user ID</p><form action="/auth" method="POST"><input type="text" name="uid" placeholder="Enter ID (Admin: ADMIN1, Customer: C303)" required><button type="submit" class="btn full-width">Sign In</button></form><p style="font-size:13px;margin-top:20px;">Want to join LocalEats? <a href="/register" style="color:var(--le-green);text-decoration:none;font-weight:bold;">Register</a></p></div>""")
+    err = request.args.get('err', '')
+    err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Login</h2><p class="subtitle">Sign in with your User ID and password</p>{err_html}<form action="/auth" method="POST"><input type="text" name="uid" placeholder="Enter ID (Admin: ADMIN1, Customer: C303)" required><input type="password" name="password" placeholder="Password" required><button type="submit" class="btn full-width">Sign In</button></form><p style="font-size:13px;margin-top:20px;">Want to join LocalEats? <a href="/register" style="color:var(--le-green);text-decoration:none;font-weight:bold;">Create Account</a></p><p style="font-size:11px;color:var(--muted);margin-top:18px;">Demo IDs: ADMIN1 / admin123 &nbsp;•&nbsp; C303 / cust123 &nbsp;•&nbsp; VEND101 / vendor123</p></div>""")
 
 @app.route('/auth', methods=['POST'])
 def auth():
     uid = request.form.get('uid', '').upper().strip()
-    if uid in users_db:
-        role, name = users_db[uid]["role"].lower(), users_db[uid]["name"]
-        if role == "admin": return redirect(url_for("admin_dashboard"))
-        if role == "customer": return redirect(url_for("customer_dashboard", uid=uid, name=name))
-        if role == "vendor": return redirect(url_for("vendor_dashboard", uid=uid, name=name))
-        if role == "driver": return redirect(url_for("driver_dashboard", uid=uid, name=name))
-    return "<h3>ID Pending or Invalid.</h3><a href='/'>Back</a>"
+    password = request.form.get('password', '')
+    user = users_db.get(uid)
+    if not user:
+        return redirect(url_for('login_page', err='Invalid User ID or password.'))
+    if not check_password_hash(user.get("password", ""), password):
+        return redirect(url_for('login_page', err='Invalid User ID or password.'))
+    role, name = user["role"].lower(), user["name"]
+    if role == "admin": return redirect(url_for("admin_dashboard"))
+    if role == "customer": return redirect(url_for("customer_dashboard", uid=uid, name=name))
+    if role == "vendor": return redirect(url_for("vendor_dashboard", uid=uid, name=name))
+    if role == "driver": return redirect(url_for("driver_dashboard", uid=uid, name=name))
+    return redirect(url_for('login_page', err='Unknown role.'))
 
 @app.route('/register')
 def register_choice():
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Choose Registration Type</h2><p class="subtitle">Select how you want to sign up</p><div class="btn-row" style="flex-direction:column;"><a class="choice-card" href="/register/vendor"><h3 style="margin-bottom:8px;">Vendor Registration</h3><div class="muted">Register your restaurant and upload hygiene documents.</div></a><a class="choice-card" href="/register/driver"><h3 style="margin-bottom:8px;">Driver Registration</h3><div class="muted">Register as a delivery driver and upload your required documents.</div></a></div><div style="margin-top:18px;"><a href="/" class="btn btn-secondary">Back to Login</a></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Choose Registration Type</h2><p class="subtitle">Select how you want to sign up</p><div class="btn-row" style="flex-direction:column;"><a class="choice-card" href="/register/customer"><h3 style="margin-bottom:8px;">Customer Registration</h3><div class="muted">Order food from local restaurants. Instant account creation.</div></a><a class="choice-card" href="/register/vendor"><h3 style="margin-bottom:8px;">Vendor Registration</h3><div class="muted">Register your restaurant and upload hygiene documents. Requires Admin approval.</div></a><a class="choice-card" href="/register/driver"><h3 style="margin-bottom:8px;">Driver Registration</h3><div class="muted">Register as a delivery driver and upload your required documents. Requires Admin approval.</div></a></div><div style="margin-top:18px;"><a href="/" class="btn btn-secondary">Back to Login</a></div></div>""")
+
+@app.route('/register/customer')
+def register_customer():
+    err = request.args.get('err', '')
+    err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Customer Registration</h2>{err_html}<form action="/submit_customer_app" method="POST"><input type="text" name="cname" placeholder="Full Name" required><input type="password" name="password" placeholder="Password (min 4 chars)" required minlength="4"><input type="password" name="password_confirm" placeholder="Confirm Password" required minlength="4"><button type="submit" class="btn full-width">Create Customer Account</button></form><div style="margin-top:14px;"><a href="/register" class="btn btn-secondary">Back</a></div></div>""")
+
+@app.route('/submit_customer_app', methods=['POST'])
+def submit_customer_app():
+    cname = request.form.get('cname', '').strip()
+    password = request.form.get('password', '')
+    password_confirm = request.form.get('password_confirm', '')
+    if not cname or not password:
+        return redirect(url_for('register_customer', err='Name and password are required.'))
+    if password != password_confirm:
+        return redirect(url_for('register_customer', err='Passwords do not match.'))
+    if len(password) < 4:
+        return redirect(url_for('register_customer', err='Password must be at least 4 characters.'))
+    new_id = next_id("C")
+    users_db[new_id] = {"role": "Customer", "name": cname, "status": "Active", "password": generate_password_hash(password)}
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div class="success-box"><h3 style="color:var(--le-dark);">Account created successfully</h3><p>Welcome, <strong>{cname}</strong>!</p><p style="margin-top:10px;">Your new User ID is:</p><p style="font-size:28px;font-weight:800;color:var(--le-dark);letter-spacing:2px;">{new_id}</p><p style="font-size:12px;color:var(--muted);margin-top:8px;">Save this ID — you will use it to log in along with the password you chose.</p></div><a href="/" class="btn full-width" style="margin-top:14px;">Go to Login</a></div>""")
 
 @app.route('/register/vendor')
 def register_vendor():
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div class="progress-container"><div class="progress-line"></div><div class="step active">1<span class="step-label" style="left:0">Apply</span></div><div class="step">2<span class="step-label" style="left:-10px">Review</span></div><div class="step">3<span class="step-label" style="right:0">Live</span></div></div><form action="/submit_vendor_app" method="POST" enctype="multipart/form-data"><input type="text" name="vname" placeholder="Restaurant Name" required><input type="text" name="vaddress" placeholder="Address" required><label>Upload Hygiene Doc (PDF/JPG/PNG)</label><input type="file" name="vdoc" accept=".pdf,.jpg,.png,.jpeg" required><button type="submit" class="btn full-width">Submit Vendor Application</button></form></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div class="progress-container"><div class="progress-line"></div><div class="step active">1<span class="step-label" style="left:0">Apply</span></div><div class="step">2<span class="step-label" style="left:-10px">Review</span></div><div class="step">3<span class="step-label" style="right:0">Live</span></div></div><form action="/submit_vendor_app" method="POST" enctype="multipart/form-data"><input type="text" name="vname" placeholder="Restaurant Name" required><input type="text" name="vaddress" placeholder="Address" required><input type="password" name="password" placeholder="Password (min 4 chars)" required minlength="4"><label>Upload Hygiene Doc (PDF/JPG/PNG)</label><input type="file" name="vdoc" accept=".pdf,.jpg,.png,.jpeg" required><button type="submit" class="btn full-width">Submit Vendor Application</button></form></div>""")
 
 @app.route('/register/driver')
 def register_driver():
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div class="progress-container"><div class="progress-line"></div><div class="step active">1<span class="step-label" style="left:0">Apply</span></div><div class="step">2<span class="step-label" style="left:-10px">Review</span></div><div class="step">3<span class="step-label" style="right:0">Live</span></div></div><form action="/submit_driver_app" method="POST" enctype="multipart/form-data"><input type="text" name="dname" placeholder="Full Name" required><input type="text" name="phone" placeholder="Phone Number" required><input type="text" name="vehicle_type" placeholder="Vehicle Type (Car / Bike / Scooter)" required><input type="text" name="vehicle_plate" placeholder="Vehicle Plate Number" required><input type="text" name="bank_wallet" placeholder="Bank Account or Mobile Wallet Details" required><label>Upload Clear Driver's License Photo (PDF/JPG/PNG)</label><input type="file" name="license_file" accept=".pdf,.jpg,.png,.jpeg" required><label>Upload Clear National ID Photo (PDF/JPG/PNG)</label><input type="file" name="nid_file" accept=".pdf,.jpg,.png,.jpeg" required><button type="submit" class="btn full-width">Submit Driver Application</button></form></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div class="progress-container"><div class="progress-line"></div><div class="step active">1<span class="step-label" style="left:0">Apply</span></div><div class="step">2<span class="step-label" style="left:-10px">Review</span></div><div class="step">3<span class="step-label" style="right:0">Live</span></div></div><form action="/submit_driver_app" method="POST" enctype="multipart/form-data"><input type="text" name="dname" placeholder="Full Name" required><input type="text" name="phone" placeholder="Phone Number" required><input type="text" name="vehicle_type" placeholder="Vehicle Type (Car / Bike / Scooter)" required><input type="text" name="vehicle_plate" placeholder="Vehicle Plate Number" required><input type="text" name="bank_wallet" placeholder="Bank Account or Mobile Wallet Details" required><input type="password" name="password" placeholder="Password (min 4 chars)" required minlength="4"><label>Upload Clear Driver's License Photo (PDF/JPG/PNG)</label><input type="file" name="license_file" accept=".pdf,.jpg,.png,.jpeg" required><label>Upload Clear National ID Photo (PDF/JPG/PNG)</label><input type="file" name="nid_file" accept=".pdf,.jpg,.png,.jpeg" required><button type="submit" class="btn full-width">Submit Driver Application</button></form></div>""")
 
 @app.route('/submit_vendor_app', methods=['POST'])
 def submit_vendor_app():
     vname, vaddress, file = request.form.get('vname', '').strip(), request.form.get('vaddress', '').strip(), request.files.get('vdoc')
-    if not vname or not vaddress: return "Missing application details."
+    password = request.form.get('password', '')
+    if not vname or not vaddress or not password: return "Missing application details."
     if file and allowed_file(file.filename):
         filename = secure_filename(f"{vname}_{file.filename}"); file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-        pending_vendors[vname] = {"name": vname, "address": vaddress, "file": filename, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Vendor", "status": "Inactive - Pending Admin Approval"}
+        pending_vendors[vname] = {"name": vname, "address": vaddress, "file": filename, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Vendor", "status": "Inactive - Pending Admin Approval", "password_hash": generate_password_hash(password)}
         vendors.append({"name": vname, "lat": 30.5, "lon": 30.5, "cuisine": "Various", "rating": 4.0, "fee": 20, "time": 30})
-        return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div style="border:2px dashed orange;padding:20px;border-radius:10px;background:#fffdf5;"><h3 style="color:orange;">Vendor Application Pending</h3><p>Documents for <strong>{vname}</strong> are being reviewed.</p><p style="font-size:12px;">The file <b>{filename}</b> was successfully uploaded.</p><p style="font-size:12px;">Your profile will remain inactive until approved by an Admin.</p></div><a href="/" class="btn full-width">Return Home</a></div>""")
+        return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div style="border:2px dashed orange;padding:20px;border-radius:10px;background:#fffdf5;"><h3 style="color:orange;">Vendor Application Pending</h3><p>Documents for <strong>{vname}</strong> are being reviewed.</p><p style="font-size:12px;">The file <b>{filename}</b> was successfully uploaded.</p><p style="font-size:12px;">Your profile will remain inactive until approved by an Admin. Your User ID will be issued then.</p></div><a href="/" class="btn full-width">Return Home</a></div>""")
     return "Invalid File Type."
 
 @app.route('/submit_driver_app', methods=['POST'])
@@ -168,11 +242,12 @@ def submit_driver_app():
     dname = request.form.get('dname', '').strip(); phone = request.form.get('phone', '').strip(); vehicle_type = request.form.get('vehicle_type', '').strip()
     vehicle_plate = request.form.get('vehicle_plate', '').strip(); bank_wallet = request.form.get('bank_wallet', '').strip()
     license_file, nid_file = request.files.get('license_file'), request.files.get('nid_file')
-    if not all([dname, phone, vehicle_type, vehicle_plate, bank_wallet, license_file, nid_file]): return "Missing driver registration details."
+    password = request.form.get('password', '')
+    if not all([dname, phone, vehicle_type, vehicle_plate, bank_wallet, license_file, nid_file, password]): return "Missing driver registration details."
     if allowed_file(license_file.filename) and allowed_file(nid_file.filename):
         license_name = secure_filename(f"{dname}_license_{license_file.filename}"); nid_name = secure_filename(f"{dname}_nid_{nid_file.filename}")
         license_file.save(os.path.join(app.config['UPLOAD_FOLDER'], license_name)); nid_file.save(os.path.join(app.config['UPLOAD_FOLDER'], nid_name))
-        pending_drivers[dname] = {"name": dname, "phone": phone, "vehicle_type": vehicle_type, "vehicle_plate": vehicle_plate, "bank_wallet": bank_wallet, "license_file": license_name, "nid_file": nid_name, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Driver", "status": "Inactive - Pending Admin Approval"}
+        pending_drivers[dname] = {"name": dname, "phone": phone, "vehicle_type": vehicle_type, "vehicle_plate": vehicle_plate, "bank_wallet": bank_wallet, "license_file": license_name, "nid_file": nid_name, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Driver", "status": "Inactive - Pending Admin Approval", "password_hash": generate_password_hash(password)}
         return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div style="border:2px dashed orange;padding:20px;border-radius:10px;background:#fffdf5;"><h3 style="color:orange;">Driver Application Pending</h3><p>Registration for <strong>{dname}</strong> was submitted successfully.</p><p style="font-size:12px;">Your driver's license, national ID, vehicle details, and payout details were received.</p><p style="font-size:12px;">Your driver profile will remain inactive until approved by an Admin.</p></div><a href="/" class="btn full-width">Return Home</a></div>""")
     return "Invalid File Type."
 
@@ -231,15 +306,19 @@ def decline_driver_form(dname):
 def approve_vendor(vname):
     data = pending_vendors.get(vname)
     if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
-    new_id = next_id("VEND"); users_db[new_id] = {"role": "Vendor", "name": data["name"], "status": "Active"}; del pending_vendors[vname]
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Approved</div><div class="success-box"><h3 style="color:var(--le-dark);">Vendor approved successfully</h3><p><strong>{data['name']}</strong> is now a live vendor.</p><p>New User ID: <strong>{new_id}</strong></p><p>User Type: <strong>Vendor</strong></p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn">Back to Admin Dashboard</a></div></div>""")
+    new_id = next_id("VEND")
+    users_db[new_id] = {"role": "Vendor", "name": data["name"], "status": "Active", "password": data.get("password_hash", generate_password_hash("changeme"))}
+    del pending_vendors[vname]
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Approved</div><div class="success-box"><h3 style="color:var(--le-dark);">Vendor approved successfully</h3><p><strong>{data['name']}</strong> is now a live vendor.</p><p>New User ID: <strong>{new_id}</strong></p><p>User Type: <strong>Vendor</strong></p><p style="font-size:12px;color:var(--muted);margin-top:8px;">The vendor can log in using this ID and the password they chose at registration.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn">Back to Admin Dashboard</a></div></div>""")
 
 @app.route('/approve/driver/<dname>')
 def approve_driver(dname):
     data = pending_drivers.get(dname)
     if not data: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
-    new_id = next_id("DRV"); users_db[new_id] = {"role": "Driver", "name": data["name"], "status": "Active"}; del pending_drivers[dname]
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Approved</div><div class="success-box"><h3 style="color:var(--le-dark);">Driver approved successfully</h3><p><strong>{data['name']}</strong> is now a live driver.</p><p>New User ID: <strong>{new_id}</strong></p><p>User Type: <strong>Driver</strong></p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn">Back to Admin Dashboard</a></div></div>""")
+    new_id = next_id("DRV")
+    users_db[new_id] = {"role": "Driver", "name": data["name"], "status": "Active", "password": data.get("password_hash", generate_password_hash("changeme"))}
+    del pending_drivers[dname]
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Approved</div><div class="success-box"><h3 style="color:var(--le-dark);">Driver approved successfully</h3><p><strong>{data['name']}</strong> is now a live driver.</p><p>New User ID: <strong>{new_id}</strong></p><p>User Type: <strong>Driver</strong></p><p style="font-size:12px;color:var(--muted);margin-top:8px;">The driver can log in using this ID and the password they chose at registration.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn">Back to Admin Dashboard</a></div></div>""")
 
 @app.route('/decline/vendor/<vname>', methods=['POST'])
 def decline_vendor(vname):
@@ -512,15 +591,22 @@ def customer_dashboard():
         if time and v["time"] > float(time): continue
         results.append((v, round(dist, 2)))
     vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button class="btn">View Menu</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
+    cnt = cart_count(uid)
+    cart_badge = f'<span style="background:white;color:var(--le-dark);border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px;font-weight:800;">{cnt}</span>' if cnt else ''
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><div style="display:flex;gap:10px;"><a href="/cart?uid={uid}&name={name}" class="btn">🛒 Cart{cart_badge}</a><a href="/" class="btn btn-secondary">Logout</a></div></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
 
 @app.route('/restaurant/<rname>')
 def restaurant(rname):
     cuid = request.args.get('cuid', '')
     cname = request.args.get('cname', 'Customer')
+    msg = request.args.get('msg', '')
+    err = request.args.get('err', '')
     menu = get_vendor_menu(rname)
     categories = menu['categories']
     items = menu['items']
+
+    msg_html = f'<div class="success-box" style="margin-bottom:14px;">{msg}</div>' if msg else ''
+    err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
 
     if not categories:
         menu_section = '<div class="empty-state">This restaurant hasn\'t added their menu yet. Check back soon!</div>'
@@ -536,18 +622,35 @@ def restaurant(rname):
                 oos_label = '<span style="font-size:11px;background:#ffebee;color:#c62828;padding:2px 8px;border-radius:999px;margin-left:6px;">Unavailable</span>' if not item['in_stock'] else ''
                 img_html = f'<img src="/uploads/{item["image"]}" class="cust-item-img" alt="{item["name"]}">' if item.get('image') else '<div class="cust-item-img-placeholder">🍽️</div>'
                 desc_html = f'<div class="cust-item-desc">{item["description"]}</div>' if item.get('description') else ''
+                # Add-to-cart button (only for in-stock items and only if logged-in customer)
+                add_btn = ""
+                if item['in_stock'] and cuid:
+                    add_btn = f"""
+                    <form action="/cart/add" method="POST" style="margin:0;margin-left:auto;">
+                        <input type="hidden" name="cuid" value="{cuid}">
+                        <input type="hidden" name="cname" value="{cname}">
+                        <input type="hidden" name="vendor" value="{rname}">
+                        <input type="hidden" name="item_id" value="{iid}">
+                        <button type="submit" class="btn btn-sm">Add to Cart</button>
+                    </form>"""
                 items_html += f"""
-                <div class="cust-item {oos_cls}">
+                <div class="cust-item {oos_cls}" style="display:flex;align-items:center;">
                     {img_html}
-                    <div>
+                    <div style="flex:1;">
                         <div class="cust-item-name">{item['name']}{oos_label}</div>
                         <div class="cust-item-price">{item['price']} EGP</div>
                         {desc_html}
                     </div>
+                    {add_btn}
                 </div>"""
             menu_section += f'<div class="cust-category"><div class="cust-category-title">{cat}</div>{items_html}</div>'
 
     back_url = f'/customer?uid={cuid}&name={cname}' if cuid else '/customer'
+    cart_link = ""
+    if cuid:
+        cnt = cart_count(cuid)
+        badge = f'<span style="background:white;color:var(--le-dark);border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px;font-weight:800;">{cnt}</span>' if cnt else ''
+        cart_link = f'<a href="/cart?uid={cuid}&name={cname}" class="btn" style="margin-right:10px;">🛒 Cart{badge}</a>'
     return render_template_string(f"""{COMMON_STYLE}
     <div class="page">
         <div class="topbar">
@@ -555,12 +658,242 @@ def restaurant(rname):
                 <h1 style="color:var(--le-dark);margin-bottom:4px;">{rname}</h1>
                 <div class="muted">Menu</div>
             </div>
-            <a href="{back_url}" class="btn btn-secondary">Back</a>
+            <div>{cart_link}<a href="{back_url}" class="btn btn-secondary">Back</a></div>
         </div>
+        {msg_html}
+        {err_html}
         <div class="browse-content">
             {menu_section}
         </div>
     </div>""")
+
+# ─────────────────────────────────────────────
+# CART MANAGEMENT (FR-22, FR-23, FR-24, FR-25)
+# ─────────────────────────────────────────────
+
+@app.route('/cart')
+def view_cart():
+    uid = request.args.get('uid', '')
+    name = request.args.get('name', 'Customer')
+    msg = request.args.get('msg', '')
+    err = request.args.get('err', '')
+    if uid not in users_db or users_db[uid].get("role") != "Customer":
+        return redirect(url_for('login_page', err='Please log in as a customer to view your cart.'))
+
+    cart = carts.get(uid)
+    msg_html = f'<div class="success-box" style="margin-bottom:14px;">{msg}</div>' if msg else ''
+    err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
+
+    back_url = f'/customer?uid={uid}&name={name}'
+    if not cart or not cart["items"]:
+        body = f"""
+        <div class="empty-state" style="margin-top:20px;">
+            <h3 style="margin-bottom:8px;">Your cart is empty</h3>
+            <p>Browse restaurants and add items to get started.</p>
+            <a href="{back_url}" class="btn" style="margin-top:14px;">Browse Restaurants</a>
+        </div>"""
+        return render_template_string(f"""{COMMON_STYLE}
+        <div class="page">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1>
+                    <div class="muted">User ID: {uid}</div>
+                </div>
+                <a href="{back_url}" class="btn btn-secondary">Back</a>
+            </div>
+            {msg_html}{err_html}
+            {body}
+        </div>""")
+
+    vendor_name = cart["vendor"]
+    lines_html = ""
+    for iid, it in cart["items"].items():
+        line_total = round(float(it["price"]) * it["qty"], 2)
+        img_html = f'<img src="/uploads/{it["image"]}" class="cart-line-img" alt="{it["name"]}">' if it.get("image") else '<div class="cart-line-img-placeholder">🍽️</div>'
+        lines_html += f"""
+        <div class="cart-line">
+            {img_html}
+            <div class="cart-line-info">
+                <div class="cart-line-name">{it['name']}</div>
+                <div class="cart-line-price">{it['price']} EGP each</div>
+            </div>
+            <form class="cart-qty-form" action="/cart/update" method="POST">
+                <input type="hidden" name="cuid" value="{uid}">
+                <input type="hidden" name="cname" value="{name}">
+                <input type="hidden" name="item_id" value="{iid}">
+                <input type="number" name="qty" value="{it['qty']}" min="1" max="99">
+                <button type="submit" class="btn btn-sm btn-outline">Update</button>
+            </form>
+            <div class="cart-line-total">{line_total} EGP</div>
+            <form action="/cart/remove" method="POST" style="margin:0;">
+                <input type="hidden" name="cuid" value="{uid}">
+                <input type="hidden" name="cname" value="{name}">
+                <input type="hidden" name="item_id" value="{iid}">
+                <button type="submit" class="btn btn-sm btn-danger">Remove</button>
+            </form>
+        </div>"""
+
+    subtotal, tax, delivery_fee, total = cart_totals(cart)
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1>
+                <div class="muted">Ordering from <strong>{vendor_name}</strong> &nbsp;•&nbsp; User ID: {uid}</div>
+            </div>
+            <a href="{back_url}" class="btn btn-secondary">Continue Shopping</a>
+        </div>
+        {msg_html}{err_html}
+        <div class="grid-2">
+            <div class="card">
+                <h3 style="margin-bottom:10px;">Items</h3>
+                {lines_html}
+                <form action="/cart/clear" method="POST" style="margin-top:16px;">
+                    <input type="hidden" name="cuid" value="{uid}">
+                    <input type="hidden" name="cname" value="{name}">
+                    <button type="submit" class="btn btn-sm btn-secondary">Clear Cart</button>
+                </form>
+            </div>
+            <div class="card">
+                <h3 style="margin-bottom:14px;">Order Summary</h3>
+                <div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div>
+                <div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div>
+                <div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div>
+                <div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div>
+                <a href="/restaurant/{vendor_name}?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:14px;">Add More Items</a>
+                <button class="btn full-width btn-outline" style="margin-top:10px;" disabled title="Checkout coming in Sprint 3">Proceed to Checkout</button>
+                <div class="muted" style="font-size:11px;margin-top:8px;text-align:center;">Checkout will be available in Sprint 3.</div>
+            </div>
+        </div>
+    </div>""")
+
+@app.route('/cart/add', methods=['POST'])
+def cart_add():
+    """Add an item to the cart. FR-22, FR-25."""
+    cuid = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+    vendor = request.form.get('vendor', '').strip()
+    item_id = request.form.get('item_id', '').strip()
+
+    if cuid not in users_db or users_db[cuid].get("role") != "Customer":
+        return redirect(url_for('login_page', err='Please log in as a customer.'))
+
+    menu = get_vendor_menu(vendor)
+    item = menu['items'].get(item_id)
+    if not item:
+        return redirect(url_for('restaurant', rname=vendor, cuid=cuid, cname=cname, err='Item not found.'))
+    if not item.get('in_stock'):
+        return redirect(url_for('restaurant', rname=vendor, cuid=cuid, cname=cname, err='That item is currently unavailable.'))
+
+    cart = carts.get(cuid)
+
+    # FR-25: single-vendor restriction
+    if cart and cart.get("items") and cart.get("vendor") and cart["vendor"] != vendor:
+        return redirect(url_for('cart_conflict', cuid=cuid, cname=cname, vendor=vendor, item_id=item_id))
+
+    if not cart:
+        cart = {"vendor": vendor, "items": {}}
+        carts[cuid] = cart
+    cart["vendor"] = vendor
+
+    if item_id in cart["items"]:
+        cart["items"][item_id]["qty"] += 1
+    else:
+        cart["items"][item_id] = {
+            "name": item["name"],
+            "price": item["price"],
+            "qty": 1,
+            "image": item.get("image"),
+        }
+    return redirect(url_for('restaurant', rname=vendor, cuid=cuid, cname=cname, msg=f'Added "{item["name"]}" to cart.'))
+
+@app.route('/cart/conflict')
+def cart_conflict():
+    """Show options when customer tries to add from a different vendor. FR-25."""
+    cuid = request.args.get('cuid', '').strip()
+    cname = request.args.get('cname', 'Customer').strip()
+    vendor = request.args.get('vendor', '').strip()
+    item_id = request.args.get('item_id', '').strip()
+    current_vendor = carts.get(cuid, {}).get("vendor", "")
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="card center-card">
+        <div class="logo" style="color:var(--danger);">Different Restaurant</div>
+        <div class="danger-box">
+            <p>Your cart already has items from <strong>{current_vendor}</strong>.</p>
+            <p>LocalEats only supports ordering from one restaurant at a time.</p>
+        </div>
+        <p style="margin-top:16px;">Would you like to clear your current cart and start a new order from <strong>{vendor}</strong>?</p>
+        <form action="/cart/replace" method="POST" style="margin-top:14px;">
+            <input type="hidden" name="cuid" value="{cuid}">
+            <input type="hidden" name="cname" value="{cname}">
+            <input type="hidden" name="vendor" value="{vendor}">
+            <input type="hidden" name="item_id" value="{item_id}">
+            <button type="submit" class="btn btn-danger full-width">Clear Cart and Add Item</button>
+        </form>
+        <a href="/restaurant/{current_vendor}?cuid={cuid}&cname={cname}" class="btn btn-secondary full-width" style="margin-top:10px;">Keep My Current Cart</a>
+    </div>""")
+
+@app.route('/cart/replace', methods=['POST'])
+def cart_replace():
+    """Clear existing cart and add a new item from the new vendor. FR-25."""
+    cuid = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+    vendor = request.form.get('vendor', '').strip()
+    item_id = request.form.get('item_id', '').strip()
+    carts.pop(cuid, None)
+    menu = get_vendor_menu(vendor)
+    item = menu['items'].get(item_id)
+    if not item:
+        return redirect(url_for('restaurant', rname=vendor, cuid=cuid, cname=cname, err='Item not found.'))
+    carts[cuid] = {"vendor": vendor, "items": {item_id: {
+        "name": item["name"],
+        "price": item["price"],
+        "qty": 1,
+        "image": item.get("image"),
+    }}}
+    return redirect(url_for('restaurant', rname=vendor, cuid=cuid, cname=cname, msg=f'Cart reset. Added "{item["name"]}".'))
+
+@app.route('/cart/update', methods=['POST'])
+def cart_update():
+    """Update quantity of an item. FR-24."""
+    cuid = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+    item_id = request.form.get('item_id', '').strip()
+    try:
+        qty = int(request.form.get('qty', '1'))
+    except ValueError:
+        qty = 1
+    cart = carts.get(cuid)
+    if not cart or item_id not in cart["items"]:
+        return redirect(url_for('view_cart', uid=cuid, name=cname, err='Item not in cart.'))
+    if qty < 1:
+        del cart["items"][item_id]
+    else:
+        cart["items"][item_id]["qty"] = min(qty, 99)
+    if not cart["items"]:
+        carts.pop(cuid, None)
+    return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Cart updated.'))
+
+@app.route('/cart/remove', methods=['POST'])
+def cart_remove():
+    """Remove a single line item."""
+    cuid = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+    item_id = request.form.get('item_id', '').strip()
+    cart = carts.get(cuid)
+    if cart and item_id in cart["items"]:
+        del cart["items"][item_id]
+        if not cart["items"]:
+            carts.pop(cuid, None)
+    return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Item removed.'))
+
+@app.route('/cart/clear', methods=['POST'])
+def cart_clear():
+    """Empty the entire cart."""
+    cuid = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+    carts.pop(cuid, None)
+    return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Cart cleared.'))
 
 # ─────────────────────────────────────────────
 # VENDOR & DRIVER DASHBOARDS
