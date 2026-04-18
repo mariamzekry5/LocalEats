@@ -16,6 +16,16 @@ users_db = {
 }
 pending_vendors, pending_drivers = {}, {}
 
+DECLINE_REASONS = [
+    "Incomplete application details",
+    "Invalid or unclear uploaded documents",
+    "Expired driver's license or ID",
+    "Bank account or mobile wallet details missing/invalid",
+    "Vehicle information missing or invalid",
+    "Failed verification checks",
+    "Application does not meet platform requirements"
+]
+
 COMMON_STYLE = """
 <style>
 :root{--le-green:#4CAF50;--le-dark:#2e7d32;--le-light:#e8f5e9;--bg:#f4f7f6;--text:#222;--muted:#666;--danger:#d32f2f;--danger-dark:#b71c1c;--card-shadow:0 10px 25px rgba(0,0,0,0.06);--border:#e3e7e5;}
@@ -64,6 +74,9 @@ def render_file_preview(filename):
     if ext in ['png', 'jpg', 'jpeg']: return f'<div class="preview-box"><img src="{file_url}" alt="Uploaded document" class="preview-image"></div>'
     return f'<div class="preview-box" style="padding:20px;"><p>Preview not available.</p><a class="btn btn-outline btn-sm" href="{file_url}" target="_blank">Open File</a></div>'
 
+def decline_reason_options():
+    return "".join([f'<option value="{r}">{r}</option>' for r in DECLINE_REASONS])
+
 @app.route('/')
 def login_page():
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><h2>Login</h2><p class="subtitle">Sign in with your user ID</p><form action="/auth" method="POST"><input type="text" name="uid" placeholder="Enter ID (Admin: ADMIN1)" required><button type="submit" class="btn full-width">Sign In</button></form><p style="font-size:13px;margin-top:20px;">Want to join LocalEats? <a href="/register" style="color:var(--le-green);text-decoration:none;font-weight:bold;">Register</a></p></div>""")
@@ -110,11 +123,7 @@ def submit_driver_app():
     if allowed_file(license_file.filename) and allowed_file(nid_file.filename):
         license_name = secure_filename(f"{dname}_license_{license_file.filename}"); nid_name = secure_filename(f"{dname}_nid_{nid_file.filename}")
         license_file.save(os.path.join(app.config['UPLOAD_FOLDER'], license_name)); nid_file.save(os.path.join(app.config['UPLOAD_FOLDER'], nid_name))
-        pending_drivers[dname] = {
-            "name": dname, "phone": phone, "vehicle_type": vehicle_type, "vehicle_plate": vehicle_plate, "bank_wallet": bank_wallet,
-            "license_file": license_name, "nid_file": nid_name, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "type": "Driver", "status": "Inactive - Pending Admin Approval"
-        }
+        pending_drivers[dname] = {"name": dname, "phone": phone, "vehicle_type": vehicle_type, "vehicle_plate": vehicle_plate, "bank_wallet": bank_wallet, "license_file": license_name, "nid_file": nid_name, "submitted_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "type": "Driver", "status": "Inactive - Pending Admin Approval"}
         return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">LocalEats</div><div style="border:2px dashed orange;padding:20px;border-radius:10px;background:#fffdf5;"><h3 style="color:orange;">Driver Application Pending</h3><p>Registration for <strong>{dname}</strong> was submitted successfully.</p><p style="font-size:12px;">Your driver's license, national ID, vehicle details, and payout details were received.</p><p style="font-size:12px;">Your driver profile will remain inactive until approved by an Admin.</p></div><a href="/" class="btn full-width">Return Home</a></div>""")
     return "Invalid File Type."
 
@@ -139,7 +148,7 @@ def admin_vendor_detail(vname):
     data = pending_vendors.get(vname)
     if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
     file_url, preview_html = url_for('uploaded_file', filename=data["file"]), render_file_preview(data["file"])
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Vendor Application Review</h1><div class="muted">Inspect submitted information and uploaded document</div></div><a href="/admin" class="btn btn-secondary">Back to Dashboard</a></div><div class="grid-2"><div class="card"><h3>Submitted Information</h3><div class="info-list"><div class="info-item"><div class="info-label">Restaurant Name</div><div class="info-value">{data['name']}</div></div><div class="info-item"><div class="info-label">Address</div><div class="info-value">{data['address']}</div></div><div class="info-item"><div class="info-label">Document</div><div class="info-value">{data['file']}</div></div><div class="info-item"><div class="info-label">Status</div><div class="info-value">{data['status']}</div></div><div class="info-item"><div class="info-label">Submitted At</div><div class="info-value">{data['submitted_at']}</div></div></div><div class="actions"><a class="btn" href="/approve/vendor/{vname}">Approve Vendor</a><a class="btn btn-danger" href="/decline/vendor/{vname}">Decline Vendor</a><a class="btn btn-outline" href="{file_url}" target="_blank">Open File in New Tab</a></div></div><div class="card"><h3>Document Preview</h3>{preview_html}</div></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Vendor Application Review</h1><div class="muted">Inspect submitted information and uploaded document</div></div><a href="/admin" class="btn btn-secondary">Back to Dashboard</a></div><div class="grid-2"><div class="card"><h3>Submitted Information</h3><div class="info-list"><div class="info-item"><div class="info-label">Restaurant Name</div><div class="info-value">{data['name']}</div></div><div class="info-item"><div class="info-label">Address</div><div class="info-value">{data['address']}</div></div><div class="info-item"><div class="info-label">Document</div><div class="info-value">{data['file']}</div></div><div class="info-item"><div class="info-label">Status</div><div class="info-value">{data['status']}</div></div><div class="info-item"><div class="info-label">Submitted At</div><div class="info-value">{data['submitted_at']}</div></div></div><div class="actions"><a class="btn" href="/approve/vendor/{vname}">Approve Vendor</a><a class="btn btn-danger" href="/decline_form/vendor/{vname}">Decline Vendor</a><a class="btn btn-outline" href="{file_url}" target="_blank">Open File in New Tab</a></div></div><div class="card"><h3>Document Preview</h3>{preview_html}</div></div></div>""")
 
 @app.route('/admin/driver/<dname>')
 def admin_driver_detail(dname):
@@ -156,8 +165,20 @@ def admin_driver_detail(dname):
     <div class="info-item"><div class="info-label">Bank Account / Mobile Wallet</div><div class="info-value">{data['bank_wallet']}</div></div>
     <div class="info-item"><div class="info-label">Status</div><div class="info-value">{data['status']}</div></div>
     <div class="info-item"><div class="info-label">Submitted At</div><div class="info-value">{data['submitted_at']}</div></div></div>
-    <div class="actions"><a class="btn" href="/approve/driver/{dname}">Approve Driver</a><a class="btn btn-danger" href="/decline/driver/{dname}">Decline Driver</a></div></div>
+    <div class="actions"><a class="btn" href="/approve/driver/{dname}">Approve Driver</a><a class="btn btn-danger" href="/decline_form/driver/{dname}">Decline Driver</a></div></div>
     <div class="grid-2"><div class="card"><h3>Driver's License</h3>{license_preview}<div class="actions"><a class="btn btn-outline" href="{license_url}" target="_blank">Open License File</a></div></div><div class="card"><h3>National ID</h3>{nid_preview}<div class="actions"><a class="btn btn-outline" href="{nid_url}" target="_blank">Open National ID File</a></div></div></div></div>""")
+
+@app.route('/decline_form/vendor/<vname>')
+def decline_vendor_form(vname):
+    data = pending_vendors.get(vname)
+    if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Decline Vendor</div><h3>Select a reason</h3><form action="/decline/vendor/{vname}" method="POST"><label>Standardised Reason for Decline</label><select name="reason" required><option value="">Choose a reason</option>{decline_reason_options()}</select><button type="submit" class="btn btn-danger full-width">Confirm Decline</button></form><div style="margin-top:12px;"><a href="/admin/vendor/{vname}" class="btn btn-secondary">Cancel</a></div></div>""")
+
+@app.route('/decline_form/driver/<dname>')
+def decline_driver_form(dname):
+    data = pending_drivers.get(dname)
+    if not data: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Decline Driver</div><h3>Select a reason</h3><form action="/decline/driver/{dname}" method="POST"><label>Standardised Reason for Decline</label><select name="reason" required><option value="">Choose a reason</option>{decline_reason_options()}</select><button type="submit" class="btn btn-danger full-width">Confirm Decline</button></form><div style="margin-top:12px;"><a href="/admin/driver/{dname}" class="btn btn-secondary">Cancel</a></div></div>""")
 
 @app.route('/approve/vendor/<vname>')
 def approve_vendor(vname):
@@ -173,19 +194,21 @@ def approve_driver(dname):
     new_id = next_id("DRV"); users_db[new_id] = {"role": "Driver", "name": data["name"], "status": "Active"}; del pending_drivers[dname]
     return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Approved</div><div class="success-box"><h3 style="color:var(--le-dark);">Driver approved successfully</h3><p><strong>{data['name']}</strong> is now a live driver.</p><p>New User ID: <strong>{new_id}</strong></p><p>User Type: <strong>Driver</strong></p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn">Back to Admin Dashboard</a></div></div>""")
 
-@app.route('/decline/vendor/<vname>')
+@app.route('/decline/vendor/<vname>', methods=['POST'])
 def decline_vendor(vname):
-    data = pending_vendors.get(vname)
+    data = pending_vendors.get(vname); reason = request.form.get('reason', '').strip()
     if not data: return "<h3>Vendor application not found.</h3><a href='/admin'>Back to Admin</a>"
+    if reason not in DECLINE_REASONS: return "<h3>Invalid decline reason.</h3><a href='/admin'>Back to Admin</a>"
     del pending_vendors[vname]
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Vendor application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p>No live vendor account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Vendor application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p><strong>Reason:</strong> {reason}</p><p>No live vendor account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
 
-@app.route('/decline/driver/<dname>')
+@app.route('/decline/driver/<dname>', methods=['POST'])
 def decline_driver(dname):
-    data = pending_drivers.get(dname)
+    data = pending_drivers.get(dname); reason = request.form.get('reason', '').strip()
     if not data: return "<h3>Driver application not found.</h3><a href='/admin'>Back to Admin</a>"
+    if reason not in DECLINE_REASONS: return "<h3>Invalid decline reason.</h3><a href='/admin'>Back to Admin</a>"
     del pending_drivers[dname]
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Driver application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p>No live driver account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo" style="color:var(--danger);">Declined</div><div class="danger-box"><h3 style="color:var(--danger);">Driver application declined</h3><p><strong>{data['name']}</strong> has been removed from pending applications.</p><p><strong>Reason:</strong> {reason}</p><p>No live driver account was created.</p></div><div class="actions" style="justify-content:center;"><a href="/admin" class="btn btn-secondary">Back to Admin Dashboard</a></div></div>""")
 
 @app.route('/customer')
 def customer_dashboard():
@@ -207,3 +230,4 @@ def open_browser(): webbrowser.open_new("http://127.0.0.1:5000")
 if __name__ == '__main__':
     Timer(1.5, open_browser).start()
     app.run(port=5000, debug=False)
+    
