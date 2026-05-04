@@ -41,35 +41,38 @@ orders_db = {
         "distance_km": 4.2, "estimated_time": 18, "payout": 35,
         "items": "1x Margherita Pizza, 1x Fries", "status": "Delivered",
         "driver_uid": "DRV101", "customer_uid": "C303",
-        "delivered_at": (datetime.now() - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S")
+        "delivered_at": (datetime.now() - timedelta(minutes=45)).strftime("%Y-%m-%d %H:%M:%S"),
+        "placed_at": None, "accepted_at": None
     },
     "ORD2": {
         "order_id": "ORD2", "pickup": "Koshary Beity", "dropoff": "Bassant Ibrahim - Rehab",
         "distance_km": 3.1, "estimated_time": 14, "payout": 28,
         "items": "2x Koshary Box", "status": "Delivered",
         "driver_uid": "DRV101", "customer_uid": "C303",
-        "delivered_at": (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
+        "delivered_at": (datetime.now() - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S"),
+        "placed_at": None, "accepted_at": None
     },
     "ORD3": {
         "order_id": "ORD3", "pickup": "Burger Zone", "dropoff": "Bassant Ibrahim - Nasr City",
         "distance_km": 6.8, "estimated_time": 26, "payout": 45,
         "items": "1x Beef Burger, 1x Cola", "status": "Ready for Driver",
-        "driver_uid": None, "customer_uid": "C303", "delivered_at": None
+        "driver_uid": None, "customer_uid": "C303", "delivered_at": None,
+        "placed_at": None, "accepted_at": None
     }
 }
 
 # ── Reviews DB ────────────────────────────────────────────────────────────────
-# { order_id: { ticket fields } }
-# One review per order enforced via order_id key.
 reviews_db = {}
 
 # ── Complaints DB ─────────────────────────────────────────────────────────────
-# Empty at startup so ORD1 (delivered 45 min ago) is immediately eligible for demo.
 complaint_tickets_db = {}
 
 DISPUTE_CATEGORIES = ["Late delivery", "Wrong order", "Missing item", "Food quality", "Payment issue", "Driver issue", "Other"]
 DISPUTE_DECISIONS  = ["Full refund", "Partial refund", "Reject complaint", "Compensation voucher", "Escalate"]
-COMPLAINT_WINDOW_HOURS = 2   # AC-1: within 2 hours of delivery
+COMPLAINT_WINDOW_HOURS = 2
+
+# ── Story 3: Order Management Constants ───────────────────────────────────────
+ORDER_ACCEPT_WINDOW_MINUTES = 10   # AC-2: auto-reject after 10 minutes
 
 def next_ticket_id():
     max_num = 0
@@ -79,8 +82,36 @@ def next_ticket_id():
             except ValueError: pass
     return f"TCK{max_num + 1}"
 
+def next_order_id():
+    max_num = 0
+    for oid in orders_db:
+        if oid.startswith("ORD"):
+            try: max_num = max(max_num, int(oid.replace("ORD", "")))
+            except ValueError: pass
+    return f"ORD{max_num + 1}"
+
 def dispute_badge_class(status):
     return "badge-live" if status == "Resolved" else "badge-pending" if status == "Open" else "badge-status"
+
+# ── Story 3, AC-2: Auto-reject stale pending orders ───────────────────────────
+def auto_reject_stale_orders():
+    """Called on vendor dashboard load. Any order in 'Pending Vendor Acceptance'
+    older than ORDER_ACCEPT_WINDOW_MINUTES is automatically rejected."""
+    now = datetime.now()
+    for order in orders_db.values():
+        if order.get("status") != "Pending Vendor Acceptance":
+            continue
+        placed_at = order.get("placed_at")
+        if not placed_at:
+            continue
+        try:
+            age_minutes = (now - parse_timestamp(placed_at)).total_seconds() / 60
+            if age_minutes >= ORDER_ACCEPT_WINDOW_MINUTES:
+                order["status"] = "Rejected by Vendor"
+                order["rejection_reason"] = "Auto-rejected: no response within 10 minutes"
+                order["rejected_at"] = timestamp()
+        except Exception:
+            pass
 
 carts = {}
 TAX_RATE = 0.14
@@ -99,7 +130,6 @@ def get_vendor_menu(vendor_name):
     return menu_db[vendor_name]
 
 def get_vendor_rating(vendor_name):
-    """Compute live average rating from reviews_db for a vendor. AC-2 of Story 9."""
     ratings = [r["rating"] for r in reviews_db.values() if r["vendor"] == vendor_name]
     if not ratings:
         for v in vendors:
@@ -109,12 +139,18 @@ def get_vendor_rating(vendor_name):
     return round(sum(ratings) / len(ratings), 1)
 
 def update_vendor_rating(vendor_name):
-    """Persist the new average back into the vendors list. AC-2 of Story 9."""
     avg = get_vendor_rating(vendor_name)
     for v in vendors:
         if v["name"] == vendor_name:
             v["rating"] = avg
             break
+
+def get_vendor_eta(vendor_name):
+    """Return estimated delivery time in minutes for a vendor."""
+    for v in vendors:
+        if v["name"] == vendor_name:
+            return v.get("time", 30)
+    return 30
 
 DECLINE_REASONS = [
     "Incomplete application details",
@@ -124,6 +160,14 @@ DECLINE_REASONS = [
     "Vehicle information missing or invalid",
     "Failed verification checks",
     "Application does not meet platform requirements"
+]
+
+VENDOR_REJECT_REASONS = [
+    "Restaurant is currently closed",
+    "Item(s) are temporarily unavailable",
+    "Too many active orders — at capacity",
+    "Delivery address is outside service area",
+    "Other"
 ]
 
 COMMON_STYLE = """
@@ -207,6 +251,28 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .badge-skipped{background:#eeeeee;color:#555;}
 .info-banner{background:#fff3e0;border:1px solid #ffcc80;border-radius:10px;padding:12px 16px;font-size:13px;color:#e65100;margin-bottom:18px;}
 
+/* ── Story 3: New order status badges ─────────────────────── */
+.badge-awaiting{background:#fff8e1;color:#f57f17;}
+.badge-confirmed{background:#e8f5e9;color:#1b5e20;}
+.badge-rejected{background:#ffebee;color:#c62828;}
+.badge-new-order{background:#e8f0fe;color:#1a237e;}
+
+/* ── Story 3: Incoming order cards (vendor) ───────────────── */
+.incoming-order-card{background:white;border:2px solid #e8f0fe;border-radius:16px;padding:20px;margin-bottom:16px;position:relative;box-shadow:0 6px 20px rgba(63,81,181,0.08);}
+.incoming-order-card .order-timer{position:absolute;top:16px;right:16px;background:#fff3e0;color:#e65100;border-radius:8px;padding:6px 12px;font-size:13px;font-weight:700;}
+.incoming-order-card .order-timer.urgent{background:#ffebee;color:#c62828;animation:pulse 1s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:.6;}}
+.notification-dot{display:inline-block;width:10px;height:10px;background:#f44336;border-radius:50%;margin-left:6px;animation:pulse 1s infinite;}
+.incoming-count-badge{background:#f44336;color:white;border-radius:999px;padding:2px 9px;font-size:12px;font-weight:800;margin-left:8px;}
+.order-items-preview{background:#f8faf9;border-radius:10px;padding:12px 14px;margin:12px 0;font-size:14px;}
+.vendor-order-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px;}
+
+/* ── Story 3: Customer confirmation banner ────────────────── */
+.confirmation-banner{background:linear-gradient(135deg,#e8f5e9,#f1f8e9);border:2px solid #a5d6a7;border-radius:14px;padding:16px 20px;margin-top:10px;}
+.confirmation-banner .eta-pill{display:inline-block;background:#2e7d32;color:white;border-radius:999px;padding:4px 14px;font-size:13px;font-weight:700;margin-top:8px;}
+.rejection-banner{background:#fff5f5;border:2px solid #ffcdd2;border-radius:14px;padding:16px 20px;margin-top:10px;}
+.awaiting-banner{background:#fffde7;border:2px solid #fff176;border-radius:14px;padding:16px 20px;margin-top:10px;}
+
 @media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
 </style>
 """
@@ -250,14 +316,23 @@ def render_file_preview(filename):
 def decline_reason_options(): return "".join([f'<option value="{r}">{r}</option>' for r in DECLINE_REASONS])
 
 def stars_html(rating):
-    """Return filled/empty star icons for a numeric rating 1-5."""
     filled = int(round(float(rating)))
     return "★" * filled + "☆" * (5 - filled)
 
 def order_status_badge(status):
-    if status == "Delivered":   return "badge-delivered"
+    if status == "Delivered":                        return "badge-delivered"
+    if status == "Pending Vendor Acceptance":        return "badge-awaiting"
+    if status == "Rejected by Vendor":               return "badge-rejected"
     if status in ("Ready for Driver", "Accepted", "Picked Up", "On the Way"): return "badge-inprogress"
     return "badge-skipped"
+
+def minutes_remaining(placed_at_str):
+    """Return minutes left in the acceptance window, or 0 if expired."""
+    try:
+        elapsed = (datetime.now() - parse_timestamp(placed_at_str)).total_seconds() / 60
+        return max(0, ORDER_ACCEPT_WINDOW_MINUTES - elapsed)
+    except Exception:
+        return ORDER_ACCEPT_WINDOW_MINUTES
 
 # ─────────────────────────────────────────────
 # AUTH & REGISTRATION
@@ -642,7 +717,6 @@ def restaurant(rname):
     menu = get_vendor_menu(rname); categories = menu['categories']; items = menu['items']
     msg_html = f'<div class="success-box" style="margin-bottom:14px;">{msg}</div>' if msg else ''
     err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
-    # Display existing reviews for this restaurant
     vendor_reviews = [(oid, r) for oid, r in reviews_db.items() if r["vendor"] == rname]
     reviews_section = ""
     if vendor_reviews:
@@ -677,22 +751,17 @@ def restaurant(rname):
 
 # ─────────────────────────────────────────────
 # STORY 9 — CUSTOMER REVIEWS
-# AC-1: only after "Delivered" status
-# AC-2: updates vendor average rating
-# AC-3: one review per order
 # ─────────────────────────────────────────────
 
 @app.route('/customer/orders')
 def customer_orders():
-    """Order history page — shows delivered orders with review/complaint actions."""
     uid  = request.args.get('uid', '')
     name = request.args.get('name', 'Customer')
     msg  = request.args.get('msg', '')
     err  = request.args.get('err', '')
 
-    # All orders belonging to this customer
     my_orders = [o for o in orders_db.values() if o.get("customer_uid") == uid]
-    my_orders.sort(key=lambda o: o.get("delivered_at") or o.get("order_id"), reverse=True)
+    my_orders.sort(key=lambda o: o.get("delivered_at") or o.get("placed_at") or o.get("order_id"), reverse=True)
 
     msg_html = f'<div class="success-box" style="margin-bottom:14px;">{msg}</div>' if msg else ''
     err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
@@ -705,6 +774,34 @@ def customer_orders():
         existing_review  = reviews_db.get(oid)
         existing_ticket  = next((t for t in complaint_tickets_db.values() if t["order_id"] == oid and t["customer_uid"] == uid), None)
 
+        # ── Story 3: Status-specific customer notifications ──────────────
+        status_info_html = ""
+        if status == "Pending Vendor Acceptance":
+            mins_left = minutes_remaining(o.get("placed_at", ""))
+            status_info_html = f"""<div class="awaiting-banner">
+                <div style="font-weight:700;font-size:14px;color:#f57f17;">⏳ Waiting for restaurant confirmation…</div>
+                <div style="font-size:13px;color:#795548;margin-top:4px;">
+                    The restaurant has <strong>{int(mins_left)} min</strong> remaining to accept your order.
+                    You'll be notified here once confirmed.
+                </div>
+            </div>"""
+        elif status == "Rejected by Vendor":
+            reason = o.get("rejection_reason", "The restaurant was unable to accept this order.")
+            status_info_html = f"""<div class="rejection-banner">
+                <div style="font-weight:700;font-size:14px;color:#c62828;">❌ Order not accepted</div>
+                <div style="font-size:13px;color:#c62828;margin-top:4px;">{reason}</div>
+            </div>"""
+        elif status in ("Ready for Driver", "Accepted", "Picked Up", "On the Way"):
+            eta = o.get("estimated_time", "—")
+            accepted_at = o.get("accepted_at", "")
+            status_info_html = f"""<div class="confirmation-banner">
+                <div style="font-weight:700;font-size:14px;color:#1b5e20;">✅ Order Confirmed!</div>
+                <div style="font-size:13px;color:#2e7d32;margin-top:4px;">
+                    Your order has been accepted by the restaurant.
+                </div>
+                <span class="eta-pill">🕐 Estimated delivery: {eta} mins</span>
+            </div>"""
+
         # Review block
         review_html = ""
         if existing_review:
@@ -714,7 +811,7 @@ def customer_orders():
             </div>"""
         elif status == "Delivered":
             review_html = f'<a href="/customer/review/{oid}?uid={uid}&name={name}" class="btn btn-sm btn-outline" style="margin-top:8px;">⭐ Leave a Review</a>'
-        else:
+        elif status not in ("Pending Vendor Acceptance", "Rejected by Vendor"):
             review_html = '<span style="font-size:12px;color:var(--muted);">Review available after delivery.</span>'
 
         # Complaint block
@@ -722,7 +819,6 @@ def customer_orders():
         if existing_ticket:
             complaint_html = f'<span class="badge {dispute_badge_class(existing_ticket["status"])}" style="margin-top:8px;">Ticket {existing_ticket["ticket_id"]}: {existing_ticket["status"]}</span>'
         elif status == "Delivered":
-            # AC-1: check 2-hour window
             delivered_at = o.get("delivered_at")
             within_window = False
             if delivered_at:
@@ -745,6 +841,8 @@ def customer_orders():
                 </div>
                 <div style="color:var(--muted);font-size:13px;">🍽️ {o.get('pickup','Restaurant')} &nbsp;•&nbsp; {o.get('items','')}</div>
                 {f'<div style="color:var(--muted);font-size:12px;margin-top:4px;">Delivered: {o.get("delivered_at","")}</div>' if o.get("delivered_at") else ''}
+                {f'<div style="color:var(--muted);font-size:12px;margin-top:4px;">Placed: {o.get("placed_at","")}</div>' if o.get("placed_at") and status not in ("Delivered",) else ''}
+                {status_info_html}
                 {review_html}
                 {complaint_html}
             </div>
@@ -769,20 +867,14 @@ def customer_orders():
 
 @app.route('/customer/review/<order_id>', methods=['GET'])
 def customer_review_form(order_id):
-    """
-    Story 9, AC-1: only accessible when order is Delivered.
-    Story 9, AC-3: one review per order.
-    """
     uid  = request.args.get('uid', '')
     name = request.args.get('name', 'Customer')
     order = orders_db.get(order_id)
 
-    # AC-1: order must be Delivered
     if not order or order.get("status") != "Delivered":
         return redirect(url_for('customer_orders', uid=uid, name=name,
                                 err='Reviews are only available for delivered orders.'))
 
-    # AC-3: one review per order
     if order_id in reviews_db:
         return redirect(url_for('customer_orders', uid=uid, name=name,
                                 err='You have already submitted a review for this order.'))
@@ -790,7 +882,6 @@ def customer_review_form(order_id):
     vendor = order.get("pickup", "Restaurant")
     back_url = url_for('customer_orders', uid=uid, name=name)
 
-    # Interactive 5-star picker using CSS-only reverse flex trick
     star_inputs = ""
     for i in range(5, 0, -1):
         star_inputs += f'<input type="radio" id="star{i}" name="rating" value="{i}" required><label for="star{i}" title="{i} star{"s" if i>1 else ""}">★</label>'
@@ -822,9 +913,6 @@ def customer_review_form(order_id):
 
 @app.route('/customer/review/submit', methods=['POST'])
 def customer_review_submit():
-    """
-    Story 9 — persist review, update vendor average rating (AC-2), enforce one per order (AC-3).
-    """
     uid       = request.form.get('uid', '')
     name      = request.form.get('name', 'Customer')
     order_id  = request.form.get('order_id', '').strip().upper()
@@ -839,11 +927,9 @@ def customer_review_submit():
         return redirect(url_for('customer_review_form', order_id=order_id, uid=uid, name=name))
 
     order = orders_db.get(order_id)
-    # AC-1: must be delivered
     if not order or order.get("status") != "Delivered":
         return redirect(url_for('customer_orders', uid=uid, name=name,
                                 err='Cannot review an order that has not been delivered.'))
-    # AC-3: one review per order
     if order_id in reviews_db:
         return redirect(url_for('customer_orders', uid=uid, name=name,
                                 err='You have already submitted a review for this order.'))
@@ -858,7 +944,6 @@ def customer_review_submit():
         "created_at":  timestamp()
     }
 
-    # AC-2: update vendor live average rating
     update_vendor_rating(vendor)
 
     return render_template_string(f"""{COMMON_STYLE}
@@ -882,16 +967,12 @@ def customer_review_submit():
 
 # ─────────────────────────────────────────────
 # STORY 16 — CUSTOMER COMPLAINTS
-# AC-1: Report Issue within 2 hours of delivery
-# AC-2: Standardised dropdown + optional photo upload
-# AC-3: Unique Ticket ID + confirmation message
 # ─────────────────────────────────────────────
 
 @app.route('/customer/complaint', methods=['GET', 'POST'])
 def customer_create_complaint():
     uid      = request.args.get('uid',      request.form.get('uid',      'C303'))
     name     = request.args.get('name',     request.form.get('name',     'Customer'))
-    # Pre-select order if coming from order history
     preselect_order = request.args.get('order_id', '')
     err = request.args.get('err', '')
     err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
@@ -909,12 +990,10 @@ def customer_create_complaint():
 
         order = orders_db.get(order_id)
 
-        # AC-1: order must be Delivered
         if not order or order.get("status") != "Delivered":
             return redirect(url_for('customer_create_complaint', uid=uid, name=name,
                                     err='You can only file a complaint for a delivered order.'))
 
-        # AC-1: within 2 hours of delivery
         delivered_at = order.get("delivered_at")
         if delivered_at:
             try:
@@ -925,14 +1004,12 @@ def customer_create_complaint():
             except Exception:
                 pass
 
-        # AC-2: optional photo upload
         saved_photo = None
         if photo_file and photo_file.filename and allowed_file(photo_file.filename):
             photo_filename = secure_filename(f"complaint_{uid}_{order_id}_{photo_file.filename}")
             photo_file.save(os.path.join(app.config['UPLOAD_FOLDER'], photo_filename))
             saved_photo = photo_filename
 
-        # AC-3: generate unique Ticket ID
         tid = next_ticket_id()
         complaint_tickets_db[tid] = {
             "ticket_id":     tid,
@@ -955,7 +1032,6 @@ def customer_create_complaint():
             "audit_log":     [f"Ticket created by customer {name} ({uid}) at {timestamp()}"]
         }
 
-        # AC-3: show confirmation with Ticket ID
         return render_template_string(f"""{COMMON_STYLE}
         <div class="card center-card">
             <div class="logo">LocalEats</div>
@@ -974,8 +1050,6 @@ def customer_create_complaint():
             <a href="/customer?uid={uid}&name={name}" class="btn btn-secondary full-width" style="margin-top:8px;">Browse Restaurants</a>
         </div>""")
 
-    # GET — build form
-    # Only show delivered orders eligible for complaint (not already complained, within 2 hr)
     eligible_orders = []
     for oid, o in orders_db.items():
         if o.get("customer_uid") != uid: continue
@@ -1008,7 +1082,6 @@ def customer_create_complaint():
         f'<option value="{oid}" {"selected" if oid == preselect_order else ""}>{oid} — {o.get("pickup","Restaurant")}</option>'
         for oid, o in eligible_orders
     ])
-    # If preselect but not in eligible (e.g. window closed), still show it with a warning
     if preselect_order and not any(oid == preselect_order for oid, _ in eligible_orders):
         order_options = f'<option value="{preselect_order}" selected>{preselect_order}</option>' + order_options
 
@@ -1069,7 +1142,7 @@ def view_cart():
         img_html = f'<img src="/uploads/{it["image"]}" class="cart-line-img" alt="{it["name"]}">' if it.get("image") else '<div class="cart-line-img-placeholder">🍽️</div>'
         lines_html += f"""<div class="cart-line">{img_html}<div class="cart-line-info"><div class="cart-line-name">{it['name']}</div><div class="cart-line-price">{it['price']} EGP each</div></div><form class="cart-qty-form" action="/cart/update" method="POST"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><input type="hidden" name="item_id" value="{iid}"><input type="number" name="qty" value="{it['qty']}" min="1" max="99"><button type="submit" class="btn btn-sm btn-outline">Update</button></form><div class="cart-line-total">{line_total} EGP</div><form action="/cart/remove" method="POST" style="margin:0;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><input type="hidden" name="item_id" value="{iid}"><button type="submit" class="btn btn-sm btn-danger">Remove</button></form></div>"""
     subtotal, tax, delivery_fee, total = cart_totals(cart)
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1><div class="muted">Ordering from <strong>{vendor_name}</strong> &nbsp;•&nbsp; User ID: {uid}</div></div><a href="{back_url}" class="btn btn-secondary">Continue Shopping</a></div>{msg_html}{err_html}<div class="grid-2"><div class="card"><h3 style="margin-bottom:10px;">Items</h3>{lines_html}<form action="/cart/clear" method="POST" style="margin-top:16px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn btn-sm btn-secondary">Clear Cart</button></form></div><div class="card"><h3 style="margin-bottom:14px;">Order Summary</h3><div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div><div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div><div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div><div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div><a href="/restaurant/{vendor_name}?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:14px;">Add More Items</a><button class="btn full-width btn-outline" style="margin-top:10px;" disabled title="Checkout coming in Sprint 3">Proceed to Checkout</button><div class="muted" style="font-size:11px;margin-top:8px;text-align:center;">Checkout will be available in Sprint 3.</div></div></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1><div class="muted">Ordering from <strong>{vendor_name}</strong> &nbsp;•&nbsp; User ID: {uid}</div></div><a href="{back_url}" class="btn btn-secondary">Continue Shopping</a></div>{msg_html}{err_html}<div class="grid-2"><div class="card"><h3 style="margin-bottom:10px;">Items</h3>{lines_html}<form action="/cart/clear" method="POST" style="margin-top:16px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn btn-sm btn-secondary">Clear Cart</button></form></div><div class="card"><h3 style="margin-bottom:14px;">Order Summary</h3><div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div><div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div><div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div><div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div><a href="/restaurant/{vendor_name}?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:14px;">Add More Items</a><form action="/checkout" method="POST" style="margin-top:10px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn full-width">Proceed to Checkout</button></form></div></div></div>""")
 
 @app.route('/cart/add', methods=['POST'])
 def cart_add():
@@ -1134,6 +1207,174 @@ def cart_clear():
     carts.pop(cuid, None)
     return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Cart cleared.'))
 
+
+# ─────────────────────────────────────────────
+# STORY 3 — CHECKOUT (places order, sends to vendor)
+# AC-1: Order surfaces on vendor dashboard immediately
+# AC-3: Customer sees confirmation with ETA
+# ─────────────────────────────────────────────
+
+@app.route('/checkout', methods=['POST'])
+def checkout():
+    """
+    Story 3, AC-1: Creates order with status 'Pending Vendor Acceptance'.
+    The vendor sees it immediately on their dashboard.
+    Story 3, AC-3: Customer receives order confirmation page with ETA.
+    """
+    cuid  = request.form.get('cuid', '').strip()
+    cname = request.form.get('cname', 'Customer').strip()
+
+    if cuid not in users_db or users_db[cuid].get("role") != "Customer":
+        return redirect(url_for('login_page', err='Please log in as a customer.'))
+
+    cart = carts.get(cuid)
+    if not cart or not cart.get("items"):
+        return redirect(url_for('view_cart', uid=cuid, name=cname, err='Your cart is empty.'))
+
+    vendor_name = cart["vendor"]
+    subtotal, tax, delivery_fee, total = cart_totals(cart)
+    items_summary = ", ".join([f'{it["qty"]}x {it["name"]}' for it in cart["items"].values()])
+    eta = get_vendor_eta(vendor_name)
+    new_oid = next_order_id()
+    placed_ts = timestamp()
+
+    orders_db[new_oid] = {
+        "order_id":       new_oid,
+        "pickup":         vendor_name,
+        "dropoff":        f"{cname} - Address on file",
+        "distance_km":    round(calculate_distance(30.5, 30.5, 30.51, 30.52), 1),
+        "estimated_time": eta,
+        "payout":         round(delivery_fee * 0.7, 2),
+        "items":          items_summary,
+        "status":         "Pending Vendor Acceptance",   # AC-1
+        "driver_uid":     None,
+        "customer_uid":   cuid,
+        "delivered_at":   None,
+        "placed_at":      placed_ts,    # AC-2: used for auto-reject timer
+        "accepted_at":    None,
+        "total_egp":      total,
+        "rejection_reason": None,
+        "rejected_at":    None,
+    }
+
+    # Clear cart after placing order
+    carts.pop(cuid, None)
+
+    # AC-3: Show customer confirmation with ETA
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="card center-card" style="max-width:560px;">
+        <div class="logo">LocalEats</div>
+        <div class="success-box">
+            <h3 style="color:var(--le-dark);">Order Placed!</h3>
+            <p>Your order has been sent to <strong>{vendor_name}</strong>.</p>
+            <p style="margin-top:10px;">Your Order ID is:</p>
+            <p style="font-size:28px;font-weight:800;color:var(--le-dark);letter-spacing:2px;">{new_oid}</p>
+
+            <div style="background:#fffde7;border:1px solid #fff176;border-radius:10px;padding:14px;margin-top:16px;text-align:left;">
+                <div style="font-size:13px;color:#555;margin-bottom:8px;font-weight:600;">🧾 Order Summary</div>
+                <div style="font-size:13px;color:#333;">{items_summary}</div>
+                <div style="display:flex;justify-content:space-between;margin-top:10px;font-size:13px;">
+                    <span>Subtotal</span><span>{subtotal} EGP</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:13px;">
+                    <span>VAT (14%)</span><span>{tax} EGP</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:13px;">
+                    <span>Delivery Fee</span><span>{delivery_fee} EGP</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:800;color:var(--le-dark);border-top:1px solid #ddd;margin-top:8px;padding-top:8px;">
+                    <span>Total</span><span>{total} EGP</span>
+                </div>
+            </div>
+
+            <div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:10px;padding:14px;margin-top:12px;">
+                <div style="font-size:13px;color:#2e7d32;font-weight:600;">⏳ Waiting for restaurant confirmation</div>
+                <div style="font-size:13px;color:#555;margin-top:4px;">
+                    <strong>{vendor_name}</strong> has up to <strong>{ORDER_ACCEPT_WINDOW_MINUTES} minutes</strong> to confirm your order.
+                    Once confirmed, estimated delivery time is <strong>~{eta} minutes</strong>.
+                </div>
+            </div>
+
+            <p style="font-size:12px;color:var(--muted);margin-top:12px;">Placed at: {placed_ts}</p>
+        </div>
+        <a href="/customer/orders?uid={cuid}&name={cname}" class="btn full-width" style="margin-top:14px;">Track My Order</a>
+        <a href="/customer?uid={cuid}&name={cname}" class="btn btn-secondary full-width" style="margin-top:8px;">Browse More Restaurants</a>
+    </div>""")
+
+
+# ─────────────────────────────────────────────
+# STORY 3 — VENDOR ORDER MANAGEMENT ROUTES
+# AC-1: Incoming orders appear on vendor dashboard
+# AC-2: Auto-reject runs on dashboard load
+# ─────────────────────────────────────────────
+
+@app.route('/vendor/order/accept/<order_id>')
+def vendor_accept_order(order_id):
+    """
+    Story 3, AC-1 + AC-3: Vendor accepts order →
+    status becomes 'Ready for Driver', customer sees ETA.
+    """
+    uid  = request.args.get('uid', '')
+    name = request.args.get('name', 'Vendor')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+
+    order = orders_db.get(order_id)
+    if not order:
+        return redirect(url_for('vendor_dashboard', uid=uid, name=name))
+
+    # Only accept if still pending and belongs to this vendor
+    if order.get("status") != "Pending Vendor Acceptance" or order.get("pickup") != restaurant_name:
+        return redirect(url_for('vendor_dashboard', uid=uid, name=name))
+
+    order["status"]      = "Ready for Driver"
+    order["accepted_at"] = timestamp()
+
+    return redirect(url_for('vendor_dashboard', uid=uid, name=name))
+
+
+@app.route('/vendor/order/reject/<order_id>', methods=['GET', 'POST'])
+def vendor_reject_order(order_id):
+    """
+    Story 3: Vendor manually rejects an incoming order with a reason.
+    """
+    uid  = request.args.get('uid', '') or request.form.get('uid', '')
+    name = request.args.get('name', 'Vendor') or request.form.get('name', 'Vendor')
+    vendor_info = users_db.get(uid, {})
+    restaurant_name = vendor_info.get('name', name)
+
+    order = orders_db.get(order_id)
+    if not order or order.get("pickup") != restaurant_name:
+        return redirect(url_for('vendor_dashboard', uid=uid, name=name))
+
+    if request.method == 'POST':
+        reason = request.form.get('reason', 'Order rejected by restaurant').strip()
+        if order.get("status") == "Pending Vendor Acceptance":
+            order["status"]           = "Rejected by Vendor"
+            order["rejection_reason"] = reason
+            order["rejected_at"]      = timestamp()
+        return redirect(url_for('vendor_dashboard', uid=uid, name=name))
+
+    # GET — show rejection reason form
+    reason_options = "".join([f'<option value="{r}">{r}</option>' for r in VENDOR_REJECT_REASONS])
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="card center-card" style="max-width:460px;">
+        <div class="logo" style="color:var(--danger);font-size:26px;">Reject Order</div>
+        <h3>Order {order_id}</h3>
+        <p class="subtitle">Select a reason so the customer is informed.</p>
+        <form method="POST">
+            <input type="hidden" name="uid"  value="{uid}">
+            <input type="hidden" name="name" value="{name}">
+            <label>Reason for Rejection</label>
+            <select name="reason" required>{reason_options}</select>
+            <div style="display:flex;gap:12px;margin-top:16px;">
+                <button type="submit" class="btn btn-danger full-width">Confirm Rejection</button>
+                <a href="/vendor?uid={uid}&name={name}" class="btn btn-secondary full-width">Cancel</a>
+            </div>
+        </form>
+    </div>""")
+
+
 # ─────────────────────────────────────────────
 # VENDOR & DRIVER DASHBOARDS
 # ─────────────────────────────────────────────
@@ -1142,8 +1383,86 @@ def cart_clear():
 def vendor_dashboard():
     uid, name = request.args.get('uid'), request.args.get('name', 'Vendor')
     vendor_info = users_db.get(uid, {}); restaurant_name = vendor_info.get('name', name)
+
+    # Story 3, AC-2: Run auto-reject check every time vendor opens dashboard
+    auto_reject_stale_orders()
+
     menu = get_vendor_menu(restaurant_name); item_count = len(menu['items']); cat_count = len(menu['categories'])
     avg_rating = get_vendor_rating(restaurant_name)
+
+    # ── Story 3, AC-1: Incoming orders pending acceptance ──────────────────
+    incoming_orders = [
+        o for o in orders_db.values()
+        if o.get("status") == "Pending Vendor Acceptance" and o.get("pickup") == restaurant_name
+    ]
+    incoming_count = len(incoming_orders)
+
+    incoming_html = ""
+    if incoming_orders:
+        cards_html = ""
+        for o in incoming_orders:
+            mins_left = minutes_remaining(o.get("placed_at", ""))
+            urgent_cls = "urgent" if mins_left < 3 else ""
+            timer_label = f"{int(mins_left)} min left"
+            cards_html += f"""
+            <div class="incoming-order-card">
+                <div class="order-timer {urgent_cls}">⏱ {timer_label}</div>
+                <h3 style="margin-bottom:6px;color:var(--le-dark);">{o['order_id']}
+                    <span class="badge badge-new-order" style="font-size:11px;margin-left:8px;">New Order</span>
+                </h3>
+                <div style="font-size:13px;color:var(--muted);margin-bottom:10px;">
+                    Customer: <strong>{o.get('customer_uid','')}</strong> &nbsp;•&nbsp;
+                    Placed: {o.get('placed_at','')}
+                </div>
+                <div class="order-items-preview">
+                    🍽️ {o.get('items','No items listed')}
+                </div>
+                <div class="metric-row">
+                    <div class="metric"><small>Total</small><b>{o.get('total_egp','—')} EGP</b></div>
+                    <div class="metric"><small>Est. Delivery</small><b>{o.get('estimated_time','—')} mins</b></div>
+                    <div class="metric"><small>Drop-off</small><b style="font-size:13px;">{o.get('dropoff','—')}</b></div>
+                </div>
+                <div style="display:flex;gap:12px;margin-top:14px;">
+                    <a href="/vendor/order/accept/{o['order_id']}?uid={uid}&name={name}"
+                       class="btn" style="flex:1;text-align:center;">✅ Accept Order</a>
+                    <a href="/vendor/order/reject/{o['order_id']}?uid={uid}&name={name}"
+                       class="btn btn-danger" style="flex:1;text-align:center;">❌ Reject Order</a>
+                </div>
+            </div>"""
+        incoming_html = f"""
+        <div class="card" style="border:2px solid #e8f0fe;">
+            <h3>
+                🔔 Incoming Orders
+                <span class="incoming-count-badge">{incoming_count}</span>
+                <span class="notification-dot"></span>
+            </h3>
+            <p class="muted" style="font-size:13px;margin-top:0;">
+                Accept or reject within <strong>{ORDER_ACCEPT_WINDOW_MINUTES} minutes</strong>.
+                Unresponded orders are auto-rejected.
+            </p>
+            <div class="vendor-order-grid">{cards_html}</div>
+        </div>"""
+    else:
+        incoming_html = f"""
+        <div class="card">
+            <h3>🔔 Incoming Orders</h3>
+            <div class="empty-state">No pending orders right now. New orders will appear here instantly.</div>
+        </div>"""
+
+    # Recent order history for vendor
+    vendor_orders = [o for o in orders_db.values() if o.get("pickup") == restaurant_name and o.get("status") != "Pending Vendor Acceptance"]
+    vendor_orders.sort(key=lambda o: o.get("placed_at") or o.get("order_id"), reverse=True)
+    recent_rows = ""
+    for o in vendor_orders[:10]:
+        badge_cls = order_status_badge(o["status"])
+        recent_rows += f'<tr><td>{o["order_id"]}</td><td>{o.get("items","—")}</td><td><span class="badge {badge_cls}">{o["status"]}</span></td><td>{o.get("accepted_at") or o.get("placed_at") or "—"}</td></tr>'
+    recent_orders_html = f"""
+    <div class="card">
+        <h3>Recent Orders</h3>
+        {f'<table><thead><tr><th>Order ID</th><th>Items</th><th>Status</th><th>Time</th></tr></thead><tbody>{recent_rows}</tbody></table>' if recent_rows else '<div class="empty-state">No order history yet.</div>'}
+    </div>"""
+
+    # Reviews section
     vendor_reviews = [(oid, r) for oid, r in reviews_db.items() if r["vendor"] == restaurant_name]
     review_html = ""
     if vendor_reviews:
@@ -1151,7 +1470,38 @@ def vendor_dashboard():
         review_html = f'<div class="card"><h3>Recent Reviews &nbsp; <span style="color:var(--le-dark);">⭐ {avg_rating}/5</span></h3>{review_items}</div>'
     else:
         review_html = '<div class="card"><h3>Reviews</h3><div class="empty-state">No reviews yet.</div></div>'
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Vendor Dashboard</h1><div class="muted">{restaurant_name} &nbsp;•&nbsp; User ID: {uid}</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="stats"><div class="stat-box"><div class="stat-label">Menu Categories</div><div class="stat-value">{cat_count}</div></div><div class="stat-box"><div class="stat-label">Menu Items</div><div class="stat-value">{item_count}</div></div><div class="stat-box"><div class="stat-label">Average Rating</div><div class="stat-value">{avg_rating}</div></div><div class="stat-box"><div class="stat-label">Status</div><div class="stat-value" style="font-size:18px;color:var(--le-green);">Active</div></div></div><div class="card"><h3>Quick Actions</h3><div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;"><a href="/vendor/menu?uid={uid}&name={name}" class="btn">Manage Menu</a></div></div>{review_html}</div>""")
+
+    incoming_badge = f'<span class="incoming-count-badge" style="font-size:13px;">{incoming_count}</span>' if incoming_count else ''
+
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Vendor Dashboard {incoming_badge}</h1>
+                <div class="muted">{restaurant_name} &nbsp;•&nbsp; User ID: {uid}</div>
+            </div>
+            <a href="/" class="btn btn-secondary">Logout</a>
+        </div>
+        <div class="stats">
+            <div class="stat-box"><div class="stat-label">Incoming Orders</div><div class="stat-value" style="color:{'#f57f17' if incoming_count else 'var(--le-dark)'};">{incoming_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Menu Categories</div><div class="stat-value">{cat_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Menu Items</div><div class="stat-value">{item_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Average Rating</div><div class="stat-value">{avg_rating}</div></div>
+        </div>
+        {incoming_html}
+        <div class="card">
+            <h3>Quick Actions</h3>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;">
+                <a href="/vendor/menu?uid={uid}&name={name}" class="btn">Manage Menu</a>
+            </div>
+        </div>
+        {recent_orders_html}
+        {review_html}
+    </div>
+    <script>
+        // AC-1: Auto-refresh vendor dashboard every 30 seconds to surface new orders
+        setTimeout(function() {{ window.location.reload(); }}, 30000);
+    </script>""")
 
 @app.route('/driver')
 def driver_dashboard():
