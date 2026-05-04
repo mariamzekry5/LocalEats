@@ -17,55 +17,120 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     a = math.sin(dlat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon/2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
+def timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
 users_db = {
     "ADMIN1": {"role": "Admin", "name": "System Admin", "status": "Active", "password": generate_password_hash("admin123")},
     "C303": {"role": "Customer", "name": "Bassant Ibrahim", "status": "Active", "password": generate_password_hash("cust123")},
-    "VEND101": {"role": "Vendor", "name": "Pizza House", "status": "Active", "password": generate_password_hash("vendor123")}
+    "VEND101": {"role": "Vendor", "name": "Pizza House", "status": "Active", "password": generate_password_hash("vendor123")},
+    "DRV101": {"role": "Driver", "name": "Karen", "status": "Active", "password": generate_password_hash("1234")}
 }
 pending_vendors, pending_drivers = {}, {}
+
+# Driver availability: { driver_uid: "Online" / "Offline" }
+driver_status_db = {}
+
+# Demo delivery orders for driver interface. In this prototype, these are kept in memory.
+orders_db = {
+    "ORD1": {
+        "order_id": "ORD1",
+        "pickup": "Pizza House",
+        "dropoff": "Bassant Ibrahim - New Cairo",
+        "distance_km": 4.2,
+        "estimated_time": 18,
+        "payout": 35,
+        "items": "1x Margherita Pizza, 1x Fries",
+        "status": "Ready for Driver",
+        "driver_uid": None
+    },
+    "ORD2": {
+        "order_id": "ORD2",
+        "pickup": "Koshary Beity",
+        "dropoff": "Bassant Ibrahim - Rehab",
+        "distance_km": 3.1,
+        "estimated_time": 14,
+        "payout": 28,
+        "items": "2x Koshary Box",
+        "status": "Ready for Driver",
+        "driver_uid": None
+    },
+    "ORD3": {
+        "order_id": "ORD3",
+        "pickup": "Burger Zone",
+        "dropoff": "Bassant Ibrahim - Nasr City",
+        "distance_km": 6.8,
+        "estimated_time": 26,
+        "payout": 45,
+        "items": "1x Beef Burger, 1x Cola",
+        "status": "Ready for Driver",
+        "driver_uid": None
+    }
+}
+
+
+# Complaint / dispute tickets for admin dispute management.
+# In this prototype, tickets are kept in memory and linked to demo Order IDs.
+complaint_tickets_db = {
+    "TCK1": {
+        "ticket_id": "TCK1",
+        "order_id": "ORD1",
+        "customer_uid": "C303",
+        "customer_name": "Bassant Ibrahim",
+        "vendor": "Pizza House",
+        "driver_uid": None,
+        "category": "Missing item",
+        "priority": "Medium",
+        "status": "Open",
+        "summary": "Customer says fries were missing from the order.",
+        "details": "The customer received the pizza but says the fries were not included.",
+        "created_at": timestamp(),
+        "updated_at": timestamp(),
+        "decision": None,
+        "refund_amount": 0.0,
+        "admin_notes": "",
+        "audit_log": ["Ticket created at " + timestamp()]
+    },
+    "TCK2": {
+        "ticket_id": "TCK2",
+        "order_id": "ORD2",
+        "customer_uid": "C303",
+        "customer_name": "Bassant Ibrahim",
+        "vendor": "Koshary Beity",
+        "driver_uid": None,
+        "category": "Late delivery",
+        "priority": "Low",
+        "status": "Open",
+        "summary": "Customer reported that the order arrived late.",
+        "details": "Customer says delivery took longer than the expected time shown in the app.",
+        "created_at": timestamp(),
+        "updated_at": timestamp(),
+        "decision": None,
+        "refund_amount": 0.0,
+        "admin_notes": "",
+        "audit_log": ["Ticket created at " + timestamp()]
+    }
+}
+
+DISPUTE_CATEGORIES = ["Late delivery", "Wrong order", "Missing item", "Food quality", "Payment issue", "Driver issue", "Other"]
+DISPUTE_DECISIONS = ["Full refund", "Partial refund", "Reject complaint", "Compensation voucher", "Escalate"]
+
+def next_ticket_id():
+    max_num = 0
+    for tid in complaint_tickets_db:
+        if tid.startswith("TCK"):
+            try:
+                max_num = max(max_num, int(tid.replace("TCK", "")))
+            except ValueError:
+                pass
+    return f"TCK{max_num + 1}"
+
+def dispute_badge_class(status):
+    return "badge-live" if status == "Resolved" else "badge-pending" if status == "Open" else "badge-status"
 
 # Cart storage: { customer_uid: {"vendor": <vendor_name>, "items": { item_id: {name, price, qty, image} } } }
 carts = {}
 TAX_RATE = 0.14  # 14% VAT (FR-23)
-
-# Order + dispute storage for Admin Dispute Management (User Story 15)
-# In this prototype, orders and complaints are kept in memory.
-orders_db = {
-    "ORD1001": {"order_id": "ORD1001", "customer_id": "C303", "customer_name": "Bassant Ibrahim", "vendor": "Pizza House", "driver": "Omar Hassan", "total": 285.0, "payment_method": "Visa ending 4242", "payment_status": "Paid", "refunded_amount": 0.0, "status": "Delivered", "items": "Pizza meal, fries, soft drink", "delivery_time": "32 minutes", "vendor_notes": "Meal marked prepared", "driver_notes": "Order delivered to customer"},
-    "ORD1002": {"order_id": "ORD1002", "customer_id": "C303", "customer_name": "Bassant Ibrahim", "vendor": "Koshary Beity", "driver": "Mona Ali", "total": 145.0, "payment_method": "Mobile wallet ending 9911", "payment_status": "Partially Refunded", "refunded_amount": 20.0, "status": "Delivered", "items": "Koshary box, extra sauce", "delivery_time": "44 minutes", "vendor_notes": "Order completed", "driver_notes": "Customer received order"}
-}
-COMPLAINT_CATEGORIES = ["Missing item", "Wrong order", "Late delivery", "Food quality", "Payment/refund issue", "Other"]
-DISPUTE_DECISIONS = ["Full refund", "Partial refund", "Reject complaint", "Compensation only", "Escalate"]
-complaints_db = {
-    "TCK1001": {
-        "ticket_id": "TCK1001", "order_id": "ORD1001", "customer_id": "C303", "customer_name": "Bassant Ibrahim",
-        "category": "Missing item", "subject": "Missing side item", "description": "The order arrived without the fries included in the meal.",
-        "status": "Open", "priority": "Normal", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "investigation_notes": "", "decision": "", "resolution": "", "refund_amount": 0.0, "compensation": "",
-        "refund_history": [], "audit_log": []
-    }
-}
-
-def timestamp(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-def add_audit(ticket, action, note=""):
-    ticket.setdefault("audit_log", []).append({"created_at": timestamp(), "actor": "ADMIN1", "action": action, "note": note})
-
-def next_ticket_id():
-    max_num = 1000
-    for tid in complaints_db:
-        if tid.startswith("TCK"):
-            try: max_num = max(max_num, int(tid.replace("TCK", "")))
-            except ValueError: pass
-    return f"TCK{max_num + 1}"
-
-def order_options_for_customer(uid):
-    return "".join([f'<option value="{oid}">{oid} - {o["vendor"]} - {o["total"]} EGP</option>' for oid, o in orders_db.items() if o.get("customer_id") == uid])
-
-def dispute_status_badge(status):
-    if status == "Resolved": return "badge-resolved"
-    if status == "Under Review": return "badge-review"
-    return "badge-open"
 
 vendors = [
     {"name":"Pizza House","lat":30.51,"lon":30.52,"cuisine":"Italian","rating":4.5,"fee":20,"time":30},
@@ -164,8 +229,12 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .cart-line-total{font-weight:800;min-width:90px;text-align:right;color:var(--le-dark);}
 .totals-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;}
 .totals-row.grand{border-top:2px solid var(--border);padding-top:14px;margin-top:8px;font-size:17px;font-weight:800;color:var(--le-dark);}
-.ticket-card{background:white;border-radius:14px;padding:18px;margin-bottom:12px;box-shadow:0 4px 12px rgba(0,0,0,0.05);border-left:5px solid var(--le-green);}
-.badge-open{background:#e3f2fd;color:#0d47a1;} .badge-review{background:#fff3e0;color:#e65100;} .badge-resolved{background:#e8f5e9;color:#1b5e20;}
+
+.badge-online{background:#e8f5e9;color:#1b5e20;} .badge-offline{background:#eeeeee;color:#555;} .badge-status{background:#e3f2fd;color:#0d47a1;}
+.driver-order-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:18px;}
+.metric-row{display:flex;gap:12px;flex-wrap:wrap;margin:12px 0;}
+.metric{flex:1;min-width:130px;background:#f8faf9;border:1px solid var(--border);border-radius:12px;padding:12px;}
+.metric small{display:block;color:var(--muted);margin-bottom:4px;} .metric b{font-size:18px;color:var(--le-dark);}
 @media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
 </style>
 """
@@ -304,32 +373,119 @@ def admin_dashboard():
     def role_badge(role): return "badge-customer" if role=="Customer" else "badge-vendor" if role=="Vendor" else "badge-driver"
     live_rows = "".join([f"""<tr><td>{u['id']}</td><td>{u['name']}</td><td><span class="badge {role_badge(u['role'])}">{u['role']}</span></td><td><span class="badge badge-live">{u['status']}</span></td></tr>""" for u in live_users])
 
-    # Complaint ticket summary shown directly on the Admin Dashboard.
-    # Admin can scan the queue first, then click into one ticket for full investigation/resolution.
-    ticket_summary_rows = ""
-    for t in sorted(complaints_db.values(), key=lambda x: x.get('created_at', ''), reverse=True):
-        order = orders_db.get(t['order_id'], {})
-        short_issue = t.get('subject', '')
-        if len(short_issue) > 38:
-            short_issue = short_issue[:35] + "..."
-        ticket_summary_rows += f"""
+    ticket_rows = "".join([f"""
         <tr>
-            <td><strong>{t['ticket_id']}</strong></td>
-            <td><strong>{t['order_id']}</strong></td>
-            <td>{t.get('customer_name', 'Unknown')}</td>
-            <td>{order.get('vendor', 'Unknown')}</td>
-            <td>{t.get('category', 'Other')}</td>
-            <td>{short_issue}</td>
-            <td><span class="badge {dispute_status_badge(t['status'])}">{t['status']}</span></td>
+            <td>{t['ticket_id']}</td>
+            <td>{t['order_id']}</td>
+            <td>{t['customer_name']}</td>
+            <td>{t['category']}</td>
+            <td>{t['summary']}</td>
+            <td><span class="badge {dispute_badge_class(t['status'])}">{t['status']}</span></td>
             <td><a class="btn btn-sm btn-outline" href="/admin/dispute/{t['ticket_id']}">View Details</a></td>
-        </tr>"""
-    ticket_summary_html = f'<table><thead><tr><th>Ticket</th><th>Order ID</th><th>Customer</th><th>Vendor</th><th>Category</th><th>Issue Summary</th><th>Status</th><th>Action</th></tr></thead><tbody>{ticket_summary_rows}</tbody></table>' if ticket_summary_rows else '<div class="empty-state">No complaint tickets created yet.</div>'
+        </tr>""" for t in complaint_tickets_db.values()])
 
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dashboard</h1><div class="muted">Review vendor and driver applications, manage users, and monitor customer complaints</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="stats"><div class="stat-box"><div class="stat-label">Pending Vendors</div><div class="stat-value">{len(pending_vendors)}</div></div><div class="stat-box"><div class="stat-label">Pending Drivers</div><div class="stat-value">{len(pending_drivers)}</div></div><div class="stat-box"><div class="stat-label">Open Disputes</div><div class="stat-value">{sum(1 for c in complaints_db.values() if c['status'] != 'Resolved')}</div></div><div class="stat-box"><div class="stat-label">Resolved Disputes</div><div class="stat-value">{sum(1 for c in complaints_db.values() if c['status'] == 'Resolved')}</div></div></div>
-    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;"><div><h3 style="margin-bottom:6px;">Complaint Ticket Summary</h3><p class="muted" style="margin:0;">Quickly scan tickets here, then open a ticket to see full order, complaint, refund, and audit details.</p></div><a class="btn" href="/admin/disputes">Open Full Dispute Queue</a></div><div style="margin-top:16px;">{ticket_summary_html}</div></div>
+    open_tickets = sum(1 for t in complaint_tickets_db.values() if t["status"] == "Open")
+    reviewing_tickets = sum(1 for t in complaint_tickets_db.values() if t["status"] == "Under Review")
+
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dashboard</h1><div class="muted">Review applications, manage live users, and resolve complaint tickets</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="stats"><div class="stat-box"><div class="stat-label">Pending Vendors</div><div class="stat-value">{len(pending_vendors)}</div></div><div class="stat-box"><div class="stat-label">Pending Drivers</div><div class="stat-value">{len(pending_drivers)}</div></div><div class="stat-box"><div class="stat-label">Open Tickets</div><div class="stat-value">{open_tickets}</div></div><div class="stat-box"><div class="stat-label">Under Review</div><div class="stat-value">{reviewing_tickets}</div></div></div>
+    <div class="card"><h3>Complaint Ticket Summary</h3>{f'<table><thead><tr><th>Ticket</th><th>Order ID</th><th>Customer</th><th>Category</th><th>Summary</th><th>Status</th><th>Action</th></tr></thead><tbody>{ticket_rows}</tbody></table>' if ticket_rows else '<div class="empty-state">No complaint tickets.</div>'}</div>
     <div class="card"><h3>Pending Vendor Applications</h3>{f'<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody>{pending_vendor_rows}</tbody></table>' if pending_vendor_rows else '<div class="empty-state">No pending vendor applications.</div>'}</div>
     <div class="card"><h3>Pending Driver Applications</h3>{f'<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody>{pending_driver_rows}</tbody></table>' if pending_driver_rows else '<div class="empty-state">No pending driver applications.</div>'}</div>
     <div class="card"><h3>Current Live Users</h3>{f'<table><thead><tr><th>User ID</th><th>Name</th><th>Type</th><th>Status</th></tr></thead><tbody>{live_rows}</tbody></table>' if live_rows else '<div class="empty-state">No live users found.</div>'}</div></div>""")
+
+@app.route('/admin/dispute/<ticket_id>')
+def admin_dispute_detail(ticket_id):
+    ticket = complaint_tickets_db.get(ticket_id)
+    if not ticket:
+        return "<h3>Complaint ticket not found.</h3><a href='/admin'>Back to Admin</a>"
+
+    if ticket["status"] == "Open":
+        ticket["status"] = "Under Review"
+        ticket["updated_at"] = timestamp()
+        ticket["audit_log"].append("Status changed to Under Review at " + timestamp())
+
+    order = orders_db.get(ticket["order_id"], {})
+    audit_html = "".join([f"<li>{entry}</li>" for entry in ticket.get("audit_log", [])])
+    decision_options = "".join([f'<option value="{d}" {"selected" if ticket.get("decision") == d else ""}>{d}</option>' for d in DISPUTE_DECISIONS])
+
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Complaint Ticket {ticket['ticket_id']}</h1>
+                <div class="muted">Linked Order ID: <strong>{ticket['order_id']}</strong> &nbsp;•&nbsp; Status: <span class="badge {dispute_badge_class(ticket['status'])}">{ticket['status']}</span></div>
+            </div>
+            <a href="/admin" class="btn btn-secondary">Back to Dashboard</a>
+        </div>
+        <div class="grid-2">
+            <div class="card">
+                <h3>Ticket Details</h3>
+                <div class="info-list">
+                    <div class="info-item"><div class="info-label">Customer</div><div class="info-value">{ticket['customer_name']} ({ticket['customer_uid']})</div></div>
+                    <div class="info-item"><div class="info-label">Category</div><div class="info-value">{ticket['category']}</div></div>
+                    <div class="info-item"><div class="info-label">Priority</div><div class="info-value">{ticket['priority']}</div></div>
+                    <div class="info-item"><div class="info-label">Summary</div><div class="info-value">{ticket['summary']}</div></div>
+                    <div class="info-item"><div class="info-label">Details</div><div class="info-value">{ticket['details']}</div></div>
+                    <div class="info-item"><div class="info-label">Created</div><div class="info-value">{ticket['created_at']}</div></div>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Linked Order Information</h3>
+                <div class="info-list">
+                    <div class="info-item"><div class="info-label">Order ID</div><div class="info-value">{ticket['order_id']}</div></div>
+                    <div class="info-item"><div class="info-label">Vendor / Pickup</div><div class="info-value">{order.get('pickup', ticket.get('vendor', 'Unknown'))}</div></div>
+                    <div class="info-item"><div class="info-label">Drop-off</div><div class="info-value">{order.get('dropoff', 'Unknown')}</div></div>
+                    <div class="info-item"><div class="info-label">Order Status</div><div class="info-value">{order.get('status', 'Unknown')}</div></div>
+                    <div class="info-item"><div class="info-label">Driver</div><div class="info-value">{order.get('driver', order.get('driver_uid', 'Not assigned'))}</div></div>
+                    <div class="info-item"><div class="info-label">Items</div><div class="info-value">{order.get('items', 'Not available')}</div></div>
+                </div>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Resolve Dispute</h3>
+            <form action="/admin/dispute/{ticket['ticket_id']}/resolve" method="POST">
+                <label>Decision</label>
+                <select name="decision" required><option value="">Select decision</option>{decision_options}</select>
+                <label>Refund Amount (EGP)</label>
+                <input type="number" name="refund_amount" min="0" step="0.5" value="{ticket.get('refund_amount', 0)}">
+                <label>Admin Investigation Notes</label>
+                <textarea name="admin_notes" rows="4" required placeholder="Explain the investigation and reason for the decision.">{ticket.get('admin_notes', '')}</textarea>
+                <button class="btn" type="submit">Confirm Resolution</button>
+            </form>
+        </div>
+        <div class="card"><h3>Audit Log</h3><ul>{audit_html}</ul></div>
+    </div>""")
+
+@app.route('/admin/dispute/<ticket_id>/resolve', methods=['POST'])
+def admin_dispute_resolve(ticket_id):
+    ticket = complaint_tickets_db.get(ticket_id)
+    if not ticket:
+        return "<h3>Complaint ticket not found.</h3><a href='/admin'>Back to Admin</a>"
+
+    decision = request.form.get('decision', '').strip()
+    notes = request.form.get('admin_notes', '').strip()
+    try:
+        refund_amount = float(request.form.get('refund_amount', '0') or 0)
+    except ValueError:
+        refund_amount = 0.0
+
+    if decision not in DISPUTE_DECISIONS:
+        return redirect(url_for('admin_dispute_detail', ticket_id=ticket_id))
+    if decision in ["Reject complaint", "Escalate"]:
+        refund_amount = 0.0
+    if decision == "Full refund" and refund_amount <= 0:
+        refund_amount = 100.0
+
+    ticket["decision"] = decision
+    ticket["refund_amount"] = round(refund_amount, 2)
+    ticket["admin_notes"] = notes
+    ticket["status"] = "Resolved" if decision != "Escalate" else "Under Review"
+    ticket["updated_at"] = timestamp()
+    ticket["audit_log"].append(f"Admin decision: {decision}; refund: {ticket['refund_amount']} EGP; updated at {timestamp()}")
+    if notes:
+        ticket["audit_log"].append("Admin notes added at " + timestamp())
+
+    return redirect(url_for('admin_dispute_detail', ticket_id=ticket_id))
 
 @app.route('/admin/vendor/<vname>')
 def admin_vendor_detail(vname):
@@ -657,7 +813,7 @@ def customer_dashboard():
     vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button class="btn">View Menu</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
     cnt = cart_count(uid)
     cart_badge = f'<span style="background:white;color:var(--le-dark);border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px;font-weight:800;">{cnt}</span>' if cnt else ''
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><div style="display:flex;gap:10px;"><a href="/customer/complaints?uid={uid}&name={name}" class="btn btn-outline">Complaints</a><a href="/cart?uid={uid}&name={name}" class="btn">🛒 Cart{cart_badge}</a><a href="/" class="btn btn-secondary">Logout</a></div></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><div style="display:flex;gap:10px;"><a href="/customer/complaint?uid={uid}&name={name}" class="btn btn-outline">Submit Complaint</a><a href="/cart?uid={uid}&name={name}" class="btn">🛒 Cart{cart_badge}</a><a href="/" class="btn btn-secondary">Logout</a></div></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
 
 @app.route('/restaurant/<rname>')
 def restaurant(rname):
@@ -730,6 +886,45 @@ def restaurant(rname):
             {menu_section}
         </div>
     </div>""")
+
+
+@app.route('/customer/complaint', methods=['GET', 'POST'])
+def customer_create_complaint():
+    uid = request.args.get('uid', request.form.get('uid', 'C303'))
+    name = request.args.get('name', request.form.get('name', 'Customer'))
+    if request.method == 'POST':
+        order_id = request.form.get('order_id', '').strip().upper()
+        category = request.form.get('category', 'Other').strip()
+        summary = request.form.get('summary', '').strip()
+        details = request.form.get('details', '').strip()
+        if not order_id or not summary:
+            return redirect(url_for('customer_create_complaint', uid=uid, name=name))
+        tid = next_ticket_id()
+        order = orders_db.get(order_id, {})
+        complaint_tickets_db[tid] = {
+            "ticket_id": tid,
+            "order_id": order_id,
+            "customer_uid": uid,
+            "customer_name": name,
+            "vendor": order.get("pickup", "Unknown"),
+            "driver_uid": order.get("driver_uid"),
+            "category": category,
+            "priority": "Medium",
+            "status": "Open",
+            "summary": summary,
+            "details": details,
+            "created_at": timestamp(),
+            "updated_at": timestamp(),
+            "decision": None,
+            "refund_amount": 0.0,
+            "admin_notes": "",
+            "audit_log": ["Ticket created by customer at " + timestamp()]
+        }
+        return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Complaint Submitted</div><div class="success-box"><h3 style="color:var(--le-dark);">Ticket created successfully</h3><p>Your complaint has been sent to the admin team.</p><p>Ticket ID: <strong>{tid}</strong></p><p>Linked Order ID: <strong>{order_id}</strong></p></div><a href="/customer?uid={uid}&name={name}" class="btn full-width" style="margin-top:14px;">Back to Customer Dashboard</a></div>""")
+
+    cat_options = "".join([f'<option value="{c}">{c}</option>' for c in DISPUTE_CATEGORIES])
+    order_options = "".join([f'<option value="{oid}">{oid} - {o.get("pickup", "Restaurant")}</option>' for oid, o in orders_db.items()])
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Submit Complaint</div><h2>Create Complaint Ticket</h2><form method="POST" action="/customer/complaint"><input type="hidden" name="uid" value="{uid}"><input type="hidden" name="name" value="{name}"><label>Order ID</label><select name="order_id" required>{order_options}</select><label>Complaint Category</label><select name="category">{cat_options}</select><label>Short Summary</label><input name="summary" placeholder="e.g. Missing item" required><label>Details</label><textarea name="details" rows="4" placeholder="Explain what happened"></textarea><button class="btn full-width" type="submit">Submit Complaint</button></form><a href="/customer?uid={uid}&name={name}" class="btn btn-secondary full-width" style="margin-top:10px;">Cancel</a></div>""")
 
 # ─────────────────────────────────────────────
 # CART MANAGEMENT (FR-22, FR-23, FR-24, FR-25)
@@ -959,194 +1154,6 @@ def cart_clear():
     carts.pop(cuid, None)
     return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Cart cleared.'))
 
-
-# ─────────────────────────────────────────────
-# ADMIN DISPUTE MANAGEMENT (User Story 15)
-# Proper workflow: Open → Under Review → Resolved
-# ─────────────────────────────────────────────
-
-@app.route('/admin/disputes')
-def admin_disputes():
-    rows = ""
-    open_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Open')
-    review_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Under Review')
-    resolved_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Resolved')
-
-    for t in sorted(complaints_db.values(), key=lambda x: x.get('created_at',''), reverse=True):
-        order = orders_db.get(t['order_id'], {})
-        rows += f"""
-        <tr>
-            <td><strong>{t['ticket_id']}</strong></td>
-            <td>{t.get('priority','Normal')}</td>
-            <td>{t.get('category','Other')}</td>
-            <td><strong>{t['order_id']}</strong></td>
-            <td>{t['customer_name']}</td>
-            <td>{order.get('vendor','Unknown')}</td>
-            <td>{t['subject']}</td>
-            <td><span class="badge {dispute_status_badge(t['status'])}">{t['status']}</span></td>
-            <td><a class="btn btn-sm btn-outline" href="/admin/dispute/{t['ticket_id']}">Review</a></td>
-        </tr>"""
-    body = f'<table><thead><tr><th>Ticket</th><th>Priority</th><th>Category</th><th>Order ID</th><th>Customer</th><th>Vendor</th><th>Issue</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>' if rows else '<div class="empty-state">No complaint tickets created yet.</div>'
-    return render_template_string(f"""{COMMON_STYLE}
-    <div class="page">
-        <div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dispute Management</h1><div class="muted">Triage complaints, investigate linked orders, choose a resolution, then log the final action.</div></div><a href="/admin" class="btn btn-secondary">Back to Dashboard</a></div>
-        <div class="stats">
-            <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value">{open_count}</div></div>
-            <div class="stat-box"><div class="stat-label">Under Review</div><div class="stat-value">{review_count}</div></div>
-            <div class="stat-box"><div class="stat-label">Resolved</div><div class="stat-value">{resolved_count}</div></div>
-            <div class="stat-box"><div class="stat-label">Total Tickets</div><div class="stat-value">{len(complaints_db)}</div></div>
-        </div>
-        <div class="card"><h3>Dispute Queue</h3>{body}</div>
-    </div>""")
-
-@app.route('/admin/dispute/<ticket_id>')
-def admin_dispute_detail(ticket_id):
-    ticket = complaints_db.get(ticket_id)
-    if not ticket: return "<h3>Complaint ticket not found.</h3><a href='/admin/disputes'>Back</a>"
-    order = orders_db.get(ticket['order_id'])
-    if not order: return "<h3>Linked order not found.</h3><a href='/admin/disputes'>Back</a>"
-
-    if ticket.get('status') == 'Open':
-        ticket['status'] = 'Under Review'
-        add_audit(ticket, 'Status changed', 'Admin opened the ticket; status moved from Open to Under Review.')
-
-    remaining = round(float(order['total']) - float(order.get('refunded_amount', 0)), 2)
-    history = "".join([f"<li>{h['created_at']}: refunded <strong>{h['amount']} EGP</strong> to {order['payment_method']} — {h['note']}</li>" for h in ticket.get('refund_history', [])]) or "<li>No refunds issued yet.</li>"
-    audit = "".join([f"<li><strong>{a['created_at']}</strong> — {a['actor']}: {a['action']}<br><span class='muted'>{a.get('note','')}</span></li>" for a in ticket.get('audit_log', [])]) or "<li>No admin actions logged yet.</li>"
-    resolved_note = f"<div class='success-box'><strong>Final Resolution:</strong> {ticket.get('resolution','')}</div>" if ticket.get('status') == 'Resolved' else ""
-
-    decision_form = ""
-    if ticket.get('status') != 'Resolved':
-        decision_options = "".join([f'<option value="{d}">{d}</option>' for d in DISPUTE_DECISIONS])
-        decision_form = f"""
-        <div class="card">
-            <h3>Investigation & Decision</h3>
-            <form action="/admin/dispute/{ticket_id}/resolve" method="POST">
-                <label>Investigation Notes</label>
-                <textarea name="investigation_notes" rows="4" required placeholder="Summarise what you checked: order, vendor, driver, payment, and customer history.">{ticket.get('investigation_notes','')}</textarea>
-                <label>Decision</label>
-                <select name="decision" required>{decision_options}</select>
-                <label>Refund Amount (EGP)</label>
-                <input type="number" name="refund_amount" min="0" max="{remaining}" step="0.5" placeholder="Use 0 for rejection or compensation-only. Max: {remaining}">
-                <label>Compensation / Coupon Note (optional)</label>
-                <input name="compensation" placeholder="e.g. 30 EGP coupon">
-                <label>Final Resolution Note</label>
-                <textarea name="resolution" rows="3" required placeholder="Explain the final decision shown in the audit record."></textarea>
-                <button type="submit" class="btn" style="margin-top:12px;">Confirm Resolution</button>
-            </form>
-        </div>"""
-
-    return render_template_string(f"""{COMMON_STYLE}
-    <div class="page">
-        <div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Ticket {ticket_id}</h1><div class="muted">Linked Order ID: <strong>{ticket['order_id']}</strong> • Status: <strong>{ticket['status']}</strong></div></div><a href="/admin/disputes" class="btn btn-secondary">Back to Disputes</a></div>
-        {resolved_note}
-        <div class="grid-2">
-            <div class="card">
-                <h3>Complaint Ticket</h3>
-                <div class="info-list">
-                    <div class="info-item"><div class="info-label">Ticket ID</div><div class="info-value">{ticket['ticket_id']}</div></div>
-                    <div class="info-item"><div class="info-label">Specific Order ID</div><div class="info-value">{ticket['order_id']}</div></div>
-                    <div class="info-item"><div class="info-label">Category</div><div class="info-value">{ticket.get('category','Other')}</div></div>
-                    <div class="info-item"><div class="info-label">Customer</div><div class="info-value">{ticket['customer_name']} ({ticket['customer_id']})</div></div>
-                    <div class="info-item"><div class="info-label">Subject</div><div class="info-value">{ticket['subject']}</div></div>
-                    <div class="info-item"><div class="info-label">Description</div><div class="info-value">{ticket['description']}</div></div>
-                    <div class="info-item"><div class="info-label">Priority</div><div class="info-value">{ticket.get('priority','Normal')}</div></div>
-                    <div class="info-item"><div class="info-label">Created At</div><div class="info-value">{ticket['created_at']}</div></div>
-                </div>
-            </div>
-            <div class="card">
-                <h3>Linked Order Investigation</h3>
-                <div class="info-list">
-                    <div class="info-item"><div class="info-label">Order ID</div><div class="info-value">{order['order_id']}</div></div>
-                    <div class="info-item"><div class="info-label">Items</div><div class="info-value">{order.get('items','Not recorded')}</div></div>
-                    <div class="info-item"><div class="info-label">Vendor</div><div class="info-value">{order['vendor']}</div></div>
-                    <div class="info-item"><div class="info-label">Driver</div><div class="info-value">{order['driver']}</div></div>
-                    <div class="info-item"><div class="info-label">Delivery Time</div><div class="info-value">{order.get('delivery_time','Not recorded')}</div></div>
-                    <div class="info-item"><div class="info-label">Vendor Notes</div><div class="info-value">{order.get('vendor_notes','None')}</div></div>
-                    <div class="info-item"><div class="info-label">Driver Notes</div><div class="info-value">{order.get('driver_notes','None')}</div></div>
-                    <div class="info-item"><div class="info-label">Order Total</div><div class="info-value">{order['total']} EGP</div></div>
-                    <div class="info-item"><div class="info-label">Payment Method</div><div class="info-value">{order['payment_method']}</div></div>
-                    <div class="info-item"><div class="info-label">Payment Status</div><div class="info-value">{order['payment_status']}</div></div>
-                    <div class="info-item"><div class="info-label">Refund Available</div><div class="info-value">{remaining} EGP</div></div>
-                </div>
-            </div>
-        </div>
-        {decision_form}
-        <div class="grid-2">
-            <div class="card"><h3>Refund History</h3><ul>{history}</ul></div>
-            <div class="card"><h3>Audit Log</h3><ul>{audit}</ul></div>
-        </div>
-    </div>""")
-
-@app.route('/admin/dispute/<ticket_id>/resolve', methods=['POST'])
-def admin_dispute_resolve(ticket_id):
-    ticket = complaints_db.get(ticket_id)
-    if not ticket: return "<h3>Complaint ticket not found.</h3><a href='/admin/disputes'>Back</a>"
-    order = orders_db.get(ticket['order_id'])
-    if not order: return "<h3>Linked order not found.</h3><a href='/admin/disputes'>Back</a>"
-    if ticket.get('status') == 'Resolved':
-        return redirect(url_for('admin_dispute_detail', ticket_id=ticket_id))
-
-    investigation_notes = request.form.get('investigation_notes', '').strip()
-    decision = request.form.get('decision', '').strip()
-    compensation = request.form.get('compensation', '').strip()
-    resolution_note = request.form.get('resolution', '').strip()
-    remaining = round(float(order['total']) - float(order.get('refunded_amount', 0)), 2)
-
-    try: refund_amount = round(float(request.form.get('refund_amount') or 0), 2)
-    except ValueError: refund_amount = 0.0
-
-    if decision == 'Full refund': refund_amount = remaining
-    if decision in ['Reject complaint', 'Compensation only', 'Escalate'] and refund_amount != 0:
-        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>This decision should not include a refund amount.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
-    if decision == 'Partial refund' and refund_amount <= 0:
-        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>Partial refund requires a refund amount greater than 0.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
-    if refund_amount < 0 or refund_amount > remaining:
-        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>Invalid refund amount. Remaining refundable amount is {remaining} EGP.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
-
-    ticket['investigation_notes'] = investigation_notes
-    ticket['decision'] = decision
-    ticket['compensation'] = compensation
-    ticket['refund_amount'] = refund_amount
-    ticket['resolution'] = resolution_note
-    ticket['status'] = 'Resolved'
-
-    if refund_amount > 0:
-        order['refunded_amount'] = round(float(order.get('refunded_amount', 0)) + refund_amount, 2)
-        order['payment_status'] = 'Refunded' if order['refunded_amount'] >= float(order['total']) else 'Partially Refunded'
-        ticket.setdefault('refund_history', []).append({"amount": refund_amount, "note": resolution_note, "created_at": timestamp()})
-
-    add_audit(ticket, 'Dispute resolved', f'Decision: {decision}. Refund: {refund_amount} EGP. Compensation: {compensation or "None"}. Notes: {resolution_note}')
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Resolved</div><div class="success-box"><h3 style="color:var(--le-dark);">Dispute workflow completed</h3><p>Ticket <strong>{ticket_id}</strong> stayed linked to Order <strong>{order['order_id']}</strong>.</p><p><strong>Decision:</strong> {decision}</p><p><strong>Refund:</strong> {refund_amount} EGP</p><p><strong>Payment status:</strong> {order['payment_status']}</p></div><a href="/admin/dispute/{ticket_id}" class="btn full-width" style="margin-top:14px;">Back to Ticket</a></div>""")
-
-@app.route('/customer/complaints')
-def customer_complaints():
-    uid = request.args.get('uid', 'C303')
-    name = request.args.get('name', 'Customer')
-    opts = order_options_for_customer(uid)
-    category_opts = "".join([f'<option value="{c}">{c}</option>' for c in COMPLAINT_CATEGORIES])
-    my_tickets = [t for t in complaints_db.values() if t.get('customer_id') == uid]
-    tickets_html = "".join([f"<div class='ticket-card'><strong>{t['ticket_id']}</strong> — Order <strong>{t['order_id']}</strong><br><span class='muted'>{t.get('category','Other')} • {t['subject']} • Status: {t['status']}</span><br><span class='muted'>Decision: {t.get('decision','Pending') or 'Pending'}</span></div>" for t in my_tickets]) or "<div class='empty-state'>No complaint tickets yet.</div>"
-    no_orders = '<div class="danger-box">No completed orders are available for this demo customer.</div>' if not opts else ''
-    submit_disabled = 'disabled' if not opts else ''
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Customer Complaints</h1><div class="muted">Create a complaint ticket linked to a specific Order ID</div></div><a href="/customer?uid={uid}&name={name}" class="btn btn-secondary">Back</a></div><div class="grid-2"><div class="card"><h3>Create Complaint Ticket</h3>{no_orders}<form action="/customer/complaints/create" method="POST"><input type="hidden" name="uid" value="{uid}"><input type="hidden" name="name" value="{name}"><label>Order ID</label><select name="order_id" required>{opts}</select><label>Issue Category</label><select name="category" required>{category_opts}</select><label>Complaint Subject</label><input name="subject" required placeholder="e.g. Missing item"><label>Description</label><textarea name="description" rows="4" required></textarea><button class="btn" type="submit" {submit_disabled}>Submit Complaint</button></form></div><div class="card"><h3>Your Tickets</h3>{tickets_html}</div></div></div>""")
-
-@app.route('/customer/complaints/create', methods=['POST'])
-def customer_complaint_create():
-    uid = request.form.get('uid', '').strip()
-    name = request.form.get('name', 'Customer').strip()
-    order_id = request.form.get('order_id', '').strip()
-    category = request.form.get('category', 'Other').strip()
-    subject = request.form.get('subject', '').strip()
-    description = request.form.get('description', '').strip()
-    order = orders_db.get(order_id)
-    if not order or order.get('customer_id') != uid:
-        return redirect(url_for('customer_complaints', uid=uid, name=name))
-    ticket_id = next_ticket_id()
-    priority = 'High' if category in ['Food quality', 'Payment/refund issue'] else 'Normal'
-    complaints_db[ticket_id] = {"ticket_id": ticket_id, "order_id": order_id, "customer_id": uid, "customer_name": order.get('customer_name', name), "category": category, "subject": subject, "description": description, "status": "Open", "priority": priority, "created_at": timestamp(), "investigation_notes": "", "decision": "", "resolution": "", "refund_amount": 0.0, "compensation": "", "refund_history": [], "audit_log": [{"created_at": timestamp(), "actor": uid, "action": "Complaint created", "note": f"Category: {category}. Subject: {subject}"}]}
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Complaint Created</div><div class="success-box"><p>Ticket <strong>{ticket_id}</strong> was created and linked to Order <strong>{order_id}</strong>.</p><p>Status: <strong>Open</strong>. Admin review will move it to <strong>Under Review</strong>.</p></div><a href="/customer/complaints?uid={uid}&name={name}" class="btn full-width">Back to Complaints</a></div>""")
-
 # ─────────────────────────────────────────────
 # VENDOR & DRIVER DASHBOARDS
 # ─────────────────────────────────────────────
@@ -1184,7 +1191,175 @@ def vendor_dashboard():
 @app.route('/driver')
 def driver_dashboard():
     uid, name = request.args.get('uid'), request.args.get('name', 'Driver')
-    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Driver</div><h3>Welcome, {name}</h3><p class="subtitle">User ID: {uid}</p><p>Status: Active for deliveries</p><a href="/" class="btn full-width">Logout</a></div>""")
+    if uid not in users_db or users_db[uid].get("role") != "Driver":
+        return redirect(url_for('login_page', err='Please log in as a driver.'))
+
+    status = driver_status_db.get(uid, "Offline")
+    status_class = "badge-online" if status == "Online" else "badge-offline"
+
+    active_order = None
+    for order in orders_db.values():
+        if order.get("driver_uid") == uid and order.get("status") != "Delivered":
+            active_order = order
+            break
+
+    html = f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Driver Dashboard</h1>
+                <div class="muted">Welcome, {name} &nbsp;•&nbsp; User ID: {uid}</div>
+            </div>
+            <a href="/" class="btn btn-secondary">Logout</a>
+        </div>
+
+        <div class="card">
+            <h3>Availability</h3>
+            <p>Current status: <span class="badge {status_class}">{status}</span></p>
+            <form method="POST" action="/driver/status" class="actions" style="margin-top:8px;">
+                <input type="hidden" name="uid" value="{uid}">
+                <input type="hidden" name="name" value="{name}">
+                <button class="btn" name="status" value="Online" type="submit">Go Online</button>
+                <button class="btn btn-secondary" name="status" value="Offline" type="submit">Go Offline</button>
+            </form>
+            <div class="muted" style="font-size:12px;margin-top:8px;">Drivers cannot go offline while they have an active delivery.</div>
+        </div>
+    """
+
+    if active_order:
+        o = active_order
+        pickup = o.get('pickup') or o.get('vendor', 'Restaurant')
+        dropoff = o.get('dropoff', 'Customer address')
+        distance = o.get('distance_km', '-')
+        eta = o.get('estimated_time', '-')
+        payout = o.get('payout', '-')
+        next_button = ""
+        if o.get("status") == "Accepted":
+            next_button = '<button class="btn" name="action" value="Picked Up" type="submit">Mark as Picked Up</button>'
+        elif o.get("status") == "Picked Up":
+            next_button = '<button class="btn" name="action" value="On the Way" type="submit">Mark as On the Way</button>'
+        elif o.get("status") == "On the Way":
+            next_button = '<button class="btn" name="action" value="Delivered" type="submit">Mark as Delivered</button>'
+
+        html += f"""
+        <div class="card">
+            <h2>Active Delivery Task</h2>
+            <p><span class="badge badge-status">{o.get('status')}</span></p>
+            <div class="metric-row">
+                <div class="metric"><small>Order ID</small><b>{o.get('order_id')}</b></div>
+                <div class="metric"><small>Payout</small><b>{payout} EGP</b></div>
+                <div class="metric"><small>Distance</small><b>{distance} km</b></div>
+                <div class="metric"><small>Estimated Time</small><b>{eta} mins</b></div>
+            </div>
+            <p><b>Pickup:</b> {pickup}</p>
+            <p><b>Drop-off:</b> {dropoff}</p>
+            <p><b>Items:</b> {o.get('items', 'Order items')}</p>
+            <form method="POST" action="/driver/update/{o.get('order_id')}" class="actions">
+                <input type="hidden" name="uid" value="{uid}">
+                <input type="hidden" name="name" value="{name}">
+                {next_button}
+            </form>
+        </div>
+        """
+    else:
+        html += '<div class="card"><h2>Available Delivery Requests</h2>'
+        if status != "Online":
+            html += '<div class="empty-state">Go Online to receive delivery requests.</div>'
+        else:
+            available_orders = [o for o in orders_db.values() if o.get("status") == "Ready for Driver" and not o.get("driver_uid")]
+            if not available_orders:
+                html += '<div class="empty-state">No available delivery requests right now.</div>'
+            else:
+                html += '<div class="driver-order-grid">'
+                for o in available_orders:
+                    pickup = o.get('pickup') or o.get('vendor', 'Restaurant')
+                    html += f"""
+                    <div class="card" style="box-shadow:none;border:1px solid var(--border);margin-bottom:0;">
+                        <h3>{o.get('order_id')}</h3>
+                        <p><b>Pickup:</b> {pickup}</p>
+                        <p><b>Drop-off:</b> {o.get('dropoff', 'Customer address')}</p>
+                        <div class="metric-row">
+                            <div class="metric"><small>Distance</small><b>{o.get('distance_km', '-')} km</b></div>
+                            <div class="metric"><small>Time</small><b>{o.get('estimated_time', '-')} mins</b></div>
+                            <div class="metric"><small>Payout</small><b>{o.get('payout', '-')} EGP</b></div>
+                        </div>
+                        <a class="btn" href="/driver/accept/{o.get('order_id')}?uid={uid}&name={name}">Accept</a>
+                        <a class="btn btn-danger" href="/driver/reject/{o.get('order_id')}?uid={uid}&name={name}">Reject / Skip</a>
+                    </div>
+                    """
+                html += '</div>'
+        html += '</div>'
+
+    html += '</div>'
+    return render_template_string(html)
+
+@app.route('/driver/status', methods=['POST'])
+def driver_status():
+    uid = request.form.get('uid', '').strip()
+    name = request.form.get('name', 'Driver').strip()
+    new_status = request.form.get('status', 'Offline').strip()
+
+    has_active_order = any(o.get("driver_uid") == uid and o.get("status") != "Delivered" for o in orders_db.values())
+    if has_active_order and new_status == "Offline":
+        return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+    driver_status_db[uid] = "Online" if new_status == "Online" else "Offline"
+    return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+@app.route('/driver/accept/<order_id>')
+def driver_accept_order(order_id):
+    uid = request.args.get('uid', '').strip()
+    name = request.args.get('name', 'Driver').strip()
+
+    if driver_status_db.get(uid, "Offline") != "Online":
+        return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+    has_active_order = any(o.get("driver_uid") == uid and o.get("status") != "Delivered" for o in orders_db.values())
+    if has_active_order:
+        return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+    order = orders_db.get(order_id)
+    if order and order.get("status") == "Ready for Driver" and not order.get("driver_uid"):
+        order["driver_uid"] = uid
+        order["driver"] = users_db.get(uid, {}).get("name", name)
+        order["status"] = "Accepted"
+        order["driver_notes"] = f"Accepted by {name} at {timestamp()}"
+
+    return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+@app.route('/driver/reject/<order_id>')
+def driver_reject_order(order_id):
+    uid = request.args.get('uid', '').strip()
+    name = request.args.get('name', 'Driver').strip()
+    # In this prototype, reject/skip removes the request from the current open pool.
+    order = orders_db.get(order_id)
+    if order and order.get("status") == "Ready for Driver":
+        order["status"] = "Skipped by Driver"
+        order["driver_notes"] = f"Skipped by {name} at {timestamp()}"
+    return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+@app.route('/driver/update/<order_id>', methods=['POST'])
+def driver_update_order(order_id):
+    uid = request.form.get('uid', '').strip()
+    name = request.form.get('name', 'Driver').strip()
+    action = request.form.get('action', '').strip()
+    order = orders_db.get(order_id)
+
+    if not order or order.get("driver_uid") != uid:
+        return redirect(url_for('driver_dashboard', uid=uid, name=name))
+
+    valid_transitions = {
+        "Accepted": "Picked Up",
+        "Picked Up": "On the Way",
+        "On the Way": "Delivered"
+    }
+    if valid_transitions.get(order.get("status")) == action:
+        order["status"] = action
+        order["driver_notes"] = f"{action} by {name} at {timestamp()}"
+        if action == "Delivered":
+            order["delivery_time"] = f"Delivered at {timestamp()}"
+
+    return redirect(url_for('driver_dashboard', uid=uid, name=name))
 
 def open_browser(): webbrowser.open_new("http://127.0.0.1:5000")
 
