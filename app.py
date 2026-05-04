@@ -28,6 +28,45 @@ pending_vendors, pending_drivers = {}, {}
 carts = {}
 TAX_RATE = 0.14  # 14% VAT (FR-23)
 
+# Order + dispute storage for Admin Dispute Management (User Story 15)
+# In this prototype, orders and complaints are kept in memory.
+orders_db = {
+    "ORD1001": {"order_id": "ORD1001", "customer_id": "C303", "customer_name": "Bassant Ibrahim", "vendor": "Pizza House", "driver": "Omar Hassan", "total": 285.0, "payment_method": "Visa ending 4242", "payment_status": "Paid", "refunded_amount": 0.0, "status": "Delivered", "items": "Pizza meal, fries, soft drink", "delivery_time": "32 minutes", "vendor_notes": "Meal marked prepared", "driver_notes": "Order delivered to customer"},
+    "ORD1002": {"order_id": "ORD1002", "customer_id": "C303", "customer_name": "Bassant Ibrahim", "vendor": "Koshary Beity", "driver": "Mona Ali", "total": 145.0, "payment_method": "Mobile wallet ending 9911", "payment_status": "Partially Refunded", "refunded_amount": 20.0, "status": "Delivered", "items": "Koshary box, extra sauce", "delivery_time": "44 minutes", "vendor_notes": "Order completed", "driver_notes": "Customer received order"}
+}
+COMPLAINT_CATEGORIES = ["Missing item", "Wrong order", "Late delivery", "Food quality", "Payment/refund issue", "Other"]
+DISPUTE_DECISIONS = ["Full refund", "Partial refund", "Reject complaint", "Compensation only", "Escalate"]
+complaints_db = {
+    "TCK1001": {
+        "ticket_id": "TCK1001", "order_id": "ORD1001", "customer_id": "C303", "customer_name": "Bassant Ibrahim",
+        "category": "Missing item", "subject": "Missing side item", "description": "The order arrived without the fries included in the meal.",
+        "status": "Open", "priority": "Normal", "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "investigation_notes": "", "decision": "", "resolution": "", "refund_amount": 0.0, "compensation": "",
+        "refund_history": [], "audit_log": []
+    }
+}
+
+def timestamp(): return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+def add_audit(ticket, action, note=""):
+    ticket.setdefault("audit_log", []).append({"created_at": timestamp(), "actor": "ADMIN1", "action": action, "note": note})
+
+def next_ticket_id():
+    max_num = 1000
+    for tid in complaints_db:
+        if tid.startswith("TCK"):
+            try: max_num = max(max_num, int(tid.replace("TCK", "")))
+            except ValueError: pass
+    return f"TCK{max_num + 1}"
+
+def order_options_for_customer(uid):
+    return "".join([f'<option value="{oid}">{oid} - {o["vendor"]} - {o["total"]} EGP</option>' for oid, o in orders_db.items() if o.get("customer_id") == uid])
+
+def dispute_status_badge(status):
+    if status == "Resolved": return "badge-resolved"
+    if status == "Under Review": return "badge-review"
+    return "badge-open"
+
 vendors = [
     {"name":"Pizza House","lat":30.51,"lon":30.52,"cuisine":"Italian","rating":4.5,"fee":20,"time":30},
     {"name":"Koshary Beity","lat":30.6,"lon":30.4,"cuisine":"Egyptian","rating":4.8,"fee":10,"time":20},
@@ -125,6 +164,8 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .cart-line-total{font-weight:800;min-width:90px;text-align:right;color:var(--le-dark);}
 .totals-row{display:flex;justify-content:space-between;padding:8px 0;font-size:14px;}
 .totals-row.grand{border-top:2px solid var(--border);padding-top:14px;margin-top:8px;font-size:17px;font-weight:800;color:var(--le-dark);}
+.ticket-card{background:white;border-radius:14px;padding:18px;margin-bottom:12px;box-shadow:0 4px 12px rgba(0,0,0,0.05);border-left:5px solid var(--le-green);}
+.badge-open{background:#e3f2fd;color:#0d47a1;} .badge-review{background:#fff3e0;color:#e65100;} .badge-resolved{background:#e8f5e9;color:#1b5e20;}
 @media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
 </style>
 """
@@ -262,7 +303,30 @@ def admin_dashboard():
     live_users.sort(key=lambda x: (x["role"], x["name"]))
     def role_badge(role): return "badge-customer" if role=="Customer" else "badge-vendor" if role=="Vendor" else "badge-driver"
     live_rows = "".join([f"""<tr><td>{u['id']}</td><td>{u['name']}</td><td><span class="badge {role_badge(u['role'])}">{u['role']}</span></td><td><span class="badge badge-live">{u['status']}</span></td></tr>""" for u in live_users])
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dashboard</h1><div class="muted">Review vendor and driver applications and manage live users</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="stats"><div class="stat-box"><div class="stat-label">Pending Vendors</div><div class="stat-value">{len(pending_vendors)}</div></div><div class="stat-box"><div class="stat-label">Pending Drivers</div><div class="stat-value">{len(pending_drivers)}</div></div><div class="stat-box"><div class="stat-label">Live Vendors</div><div class="stat-value">{sum(1 for u in users_db.values() if u['role']=='Vendor')}</div></div><div class="stat-box"><div class="stat-label">Live Drivers</div><div class="stat-value">{sum(1 for u in users_db.values() if u['role']=='Driver')}</div></div></div>
+
+    # Complaint ticket summary shown directly on the Admin Dashboard.
+    # Admin can scan the queue first, then click into one ticket for full investigation/resolution.
+    ticket_summary_rows = ""
+    for t in sorted(complaints_db.values(), key=lambda x: x.get('created_at', ''), reverse=True):
+        order = orders_db.get(t['order_id'], {})
+        short_issue = t.get('subject', '')
+        if len(short_issue) > 38:
+            short_issue = short_issue[:35] + "..."
+        ticket_summary_rows += f"""
+        <tr>
+            <td><strong>{t['ticket_id']}</strong></td>
+            <td><strong>{t['order_id']}</strong></td>
+            <td>{t.get('customer_name', 'Unknown')}</td>
+            <td>{order.get('vendor', 'Unknown')}</td>
+            <td>{t.get('category', 'Other')}</td>
+            <td>{short_issue}</td>
+            <td><span class="badge {dispute_status_badge(t['status'])}">{t['status']}</span></td>
+            <td><a class="btn btn-sm btn-outline" href="/admin/dispute/{t['ticket_id']}">View Details</a></td>
+        </tr>"""
+    ticket_summary_html = f'<table><thead><tr><th>Ticket</th><th>Order ID</th><th>Customer</th><th>Vendor</th><th>Category</th><th>Issue Summary</th><th>Status</th><th>Action</th></tr></thead><tbody>{ticket_summary_rows}</tbody></table>' if ticket_summary_rows else '<div class="empty-state">No complaint tickets created yet.</div>'
+
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dashboard</h1><div class="muted">Review vendor and driver applications, manage users, and monitor customer complaints</div></div><a href="/" class="btn btn-secondary">Logout</a></div><div class="stats"><div class="stat-box"><div class="stat-label">Pending Vendors</div><div class="stat-value">{len(pending_vendors)}</div></div><div class="stat-box"><div class="stat-label">Pending Drivers</div><div class="stat-value">{len(pending_drivers)}</div></div><div class="stat-box"><div class="stat-label">Open Disputes</div><div class="stat-value">{sum(1 for c in complaints_db.values() if c['status'] != 'Resolved')}</div></div><div class="stat-box"><div class="stat-label">Resolved Disputes</div><div class="stat-value">{sum(1 for c in complaints_db.values() if c['status'] == 'Resolved')}</div></div></div>
+    <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;"><div><h3 style="margin-bottom:6px;">Complaint Ticket Summary</h3><p class="muted" style="margin:0;">Quickly scan tickets here, then open a ticket to see full order, complaint, refund, and audit details.</p></div><a class="btn" href="/admin/disputes">Open Full Dispute Queue</a></div><div style="margin-top:16px;">{ticket_summary_html}</div></div>
     <div class="card"><h3>Pending Vendor Applications</h3>{f'<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody>{pending_vendor_rows}</tbody></table>' if pending_vendor_rows else '<div class="empty-state">No pending vendor applications.</div>'}</div>
     <div class="card"><h3>Pending Driver Applications</h3>{f'<table><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Submitted</th><th>Status</th><th>Action</th></tr></thead><tbody>{pending_driver_rows}</tbody></table>' if pending_driver_rows else '<div class="empty-state">No pending driver applications.</div>'}</div>
     <div class="card"><h3>Current Live Users</h3>{f'<table><thead><tr><th>User ID</th><th>Name</th><th>Type</th><th>Status</th></tr></thead><tbody>{live_rows}</tbody></table>' if live_rows else '<div class="empty-state">No live users found.</div>'}</div></div>""")
@@ -593,7 +657,7 @@ def customer_dashboard():
     vendor_html = "".join([f"""<div class="browse-card"><b>{v['name']}</b><br>{v['cuisine']} | ⭐ {v['rating']}<br>🚚 {v['fee']} EGP | ⏱ {v['time']} mins<br>📍 {d} km<form action="/restaurant/{v['name']}"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button class="btn">View Menu</button></form></div>""" for v, d in results]) or "<p>No vendors found.</p>"
     cnt = cart_count(uid)
     cart_badge = f'<span style="background:white;color:var(--le-dark);border-radius:999px;padding:2px 8px;font-size:12px;margin-left:6px;font-weight:800;">{cnt}</span>' if cnt else ''
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><div style="display:flex;gap:10px;"><a href="/cart?uid={uid}&name={name}" class="btn">🛒 Cart{cart_badge}</a><a href="/" class="btn btn-secondary">Logout</a></div></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Welcome, {name}</h1><div class="muted">User ID: {uid} • Browse nearby restaurants</div></div><div style="display:flex;gap:10px;"><a href="/customer/complaints?uid={uid}&name={name}" class="btn btn-outline">Complaints</a><a href="/cart?uid={uid}&name={name}" class="btn">🛒 Cart{cart_badge}</a><a href="/" class="btn btn-secondary">Logout</a></div></div><div class="browse-wrap"><div class="browse-sidebar"><h3>Filters</h3><form method="POST"><input name="cuisine" placeholder="Cuisine" value="{cuisine or ''}"><input type="number" step="0.1" name="rating" placeholder="Min Rating" value="{rating or ''}"><input type="number" min="0" name="fee" placeholder="Max Delivery Fee" value="{fee or ''}"><input type="number" min="0" name="time" placeholder="Max Delivery Time" value="{time or ''}"><button class="btn">Apply Filters</button></form></div><div class="browse-content"><h2>Restaurants</h2>{vendor_html}</div></div></div>""")
 
 @app.route('/restaurant/<rname>')
 def restaurant(rname):
@@ -894,6 +958,194 @@ def cart_clear():
     cname = request.form.get('cname', 'Customer').strip()
     carts.pop(cuid, None)
     return redirect(url_for('view_cart', uid=cuid, name=cname, msg='Cart cleared.'))
+
+
+# ─────────────────────────────────────────────
+# ADMIN DISPUTE MANAGEMENT (User Story 15)
+# Proper workflow: Open → Under Review → Resolved
+# ─────────────────────────────────────────────
+
+@app.route('/admin/disputes')
+def admin_disputes():
+    rows = ""
+    open_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Open')
+    review_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Under Review')
+    resolved_count = sum(1 for c in complaints_db.values() if c.get('status') == 'Resolved')
+
+    for t in sorted(complaints_db.values(), key=lambda x: x.get('created_at',''), reverse=True):
+        order = orders_db.get(t['order_id'], {})
+        rows += f"""
+        <tr>
+            <td><strong>{t['ticket_id']}</strong></td>
+            <td>{t.get('priority','Normal')}</td>
+            <td>{t.get('category','Other')}</td>
+            <td><strong>{t['order_id']}</strong></td>
+            <td>{t['customer_name']}</td>
+            <td>{order.get('vendor','Unknown')}</td>
+            <td>{t['subject']}</td>
+            <td><span class="badge {dispute_status_badge(t['status'])}">{t['status']}</span></td>
+            <td><a class="btn btn-sm btn-outline" href="/admin/dispute/{t['ticket_id']}">Review</a></td>
+        </tr>"""
+    body = f'<table><thead><tr><th>Ticket</th><th>Priority</th><th>Category</th><th>Order ID</th><th>Customer</th><th>Vendor</th><th>Issue</th><th>Status</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>' if rows else '<div class="empty-state">No complaint tickets created yet.</div>'
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Admin Dispute Management</h1><div class="muted">Triage complaints, investigate linked orders, choose a resolution, then log the final action.</div></div><a href="/admin" class="btn btn-secondary">Back to Dashboard</a></div>
+        <div class="stats">
+            <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value">{open_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Under Review</div><div class="stat-value">{review_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Resolved</div><div class="stat-value">{resolved_count}</div></div>
+            <div class="stat-box"><div class="stat-label">Total Tickets</div><div class="stat-value">{len(complaints_db)}</div></div>
+        </div>
+        <div class="card"><h3>Dispute Queue</h3>{body}</div>
+    </div>""")
+
+@app.route('/admin/dispute/<ticket_id>')
+def admin_dispute_detail(ticket_id):
+    ticket = complaints_db.get(ticket_id)
+    if not ticket: return "<h3>Complaint ticket not found.</h3><a href='/admin/disputes'>Back</a>"
+    order = orders_db.get(ticket['order_id'])
+    if not order: return "<h3>Linked order not found.</h3><a href='/admin/disputes'>Back</a>"
+
+    if ticket.get('status') == 'Open':
+        ticket['status'] = 'Under Review'
+        add_audit(ticket, 'Status changed', 'Admin opened the ticket; status moved from Open to Under Review.')
+
+    remaining = round(float(order['total']) - float(order.get('refunded_amount', 0)), 2)
+    history = "".join([f"<li>{h['created_at']}: refunded <strong>{h['amount']} EGP</strong> to {order['payment_method']} — {h['note']}</li>" for h in ticket.get('refund_history', [])]) or "<li>No refunds issued yet.</li>"
+    audit = "".join([f"<li><strong>{a['created_at']}</strong> — {a['actor']}: {a['action']}<br><span class='muted'>{a.get('note','')}</span></li>" for a in ticket.get('audit_log', [])]) or "<li>No admin actions logged yet.</li>"
+    resolved_note = f"<div class='success-box'><strong>Final Resolution:</strong> {ticket.get('resolution','')}</div>" if ticket.get('status') == 'Resolved' else ""
+
+    decision_form = ""
+    if ticket.get('status') != 'Resolved':
+        decision_options = "".join([f'<option value="{d}">{d}</option>' for d in DISPUTE_DECISIONS])
+        decision_form = f"""
+        <div class="card">
+            <h3>Investigation & Decision</h3>
+            <form action="/admin/dispute/{ticket_id}/resolve" method="POST">
+                <label>Investigation Notes</label>
+                <textarea name="investigation_notes" rows="4" required placeholder="Summarise what you checked: order, vendor, driver, payment, and customer history.">{ticket.get('investigation_notes','')}</textarea>
+                <label>Decision</label>
+                <select name="decision" required>{decision_options}</select>
+                <label>Refund Amount (EGP)</label>
+                <input type="number" name="refund_amount" min="0" max="{remaining}" step="0.5" placeholder="Use 0 for rejection or compensation-only. Max: {remaining}">
+                <label>Compensation / Coupon Note (optional)</label>
+                <input name="compensation" placeholder="e.g. 30 EGP coupon">
+                <label>Final Resolution Note</label>
+                <textarea name="resolution" rows="3" required placeholder="Explain the final decision shown in the audit record."></textarea>
+                <button type="submit" class="btn" style="margin-top:12px;">Confirm Resolution</button>
+            </form>
+        </div>"""
+
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Ticket {ticket_id}</h1><div class="muted">Linked Order ID: <strong>{ticket['order_id']}</strong> • Status: <strong>{ticket['status']}</strong></div></div><a href="/admin/disputes" class="btn btn-secondary">Back to Disputes</a></div>
+        {resolved_note}
+        <div class="grid-2">
+            <div class="card">
+                <h3>Complaint Ticket</h3>
+                <div class="info-list">
+                    <div class="info-item"><div class="info-label">Ticket ID</div><div class="info-value">{ticket['ticket_id']}</div></div>
+                    <div class="info-item"><div class="info-label">Specific Order ID</div><div class="info-value">{ticket['order_id']}</div></div>
+                    <div class="info-item"><div class="info-label">Category</div><div class="info-value">{ticket.get('category','Other')}</div></div>
+                    <div class="info-item"><div class="info-label">Customer</div><div class="info-value">{ticket['customer_name']} ({ticket['customer_id']})</div></div>
+                    <div class="info-item"><div class="info-label">Subject</div><div class="info-value">{ticket['subject']}</div></div>
+                    <div class="info-item"><div class="info-label">Description</div><div class="info-value">{ticket['description']}</div></div>
+                    <div class="info-item"><div class="info-label">Priority</div><div class="info-value">{ticket.get('priority','Normal')}</div></div>
+                    <div class="info-item"><div class="info-label">Created At</div><div class="info-value">{ticket['created_at']}</div></div>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Linked Order Investigation</h3>
+                <div class="info-list">
+                    <div class="info-item"><div class="info-label">Order ID</div><div class="info-value">{order['order_id']}</div></div>
+                    <div class="info-item"><div class="info-label">Items</div><div class="info-value">{order.get('items','Not recorded')}</div></div>
+                    <div class="info-item"><div class="info-label">Vendor</div><div class="info-value">{order['vendor']}</div></div>
+                    <div class="info-item"><div class="info-label">Driver</div><div class="info-value">{order['driver']}</div></div>
+                    <div class="info-item"><div class="info-label">Delivery Time</div><div class="info-value">{order.get('delivery_time','Not recorded')}</div></div>
+                    <div class="info-item"><div class="info-label">Vendor Notes</div><div class="info-value">{order.get('vendor_notes','None')}</div></div>
+                    <div class="info-item"><div class="info-label">Driver Notes</div><div class="info-value">{order.get('driver_notes','None')}</div></div>
+                    <div class="info-item"><div class="info-label">Order Total</div><div class="info-value">{order['total']} EGP</div></div>
+                    <div class="info-item"><div class="info-label">Payment Method</div><div class="info-value">{order['payment_method']}</div></div>
+                    <div class="info-item"><div class="info-label">Payment Status</div><div class="info-value">{order['payment_status']}</div></div>
+                    <div class="info-item"><div class="info-label">Refund Available</div><div class="info-value">{remaining} EGP</div></div>
+                </div>
+            </div>
+        </div>
+        {decision_form}
+        <div class="grid-2">
+            <div class="card"><h3>Refund History</h3><ul>{history}</ul></div>
+            <div class="card"><h3>Audit Log</h3><ul>{audit}</ul></div>
+        </div>
+    </div>""")
+
+@app.route('/admin/dispute/<ticket_id>/resolve', methods=['POST'])
+def admin_dispute_resolve(ticket_id):
+    ticket = complaints_db.get(ticket_id)
+    if not ticket: return "<h3>Complaint ticket not found.</h3><a href='/admin/disputes'>Back</a>"
+    order = orders_db.get(ticket['order_id'])
+    if not order: return "<h3>Linked order not found.</h3><a href='/admin/disputes'>Back</a>"
+    if ticket.get('status') == 'Resolved':
+        return redirect(url_for('admin_dispute_detail', ticket_id=ticket_id))
+
+    investigation_notes = request.form.get('investigation_notes', '').strip()
+    decision = request.form.get('decision', '').strip()
+    compensation = request.form.get('compensation', '').strip()
+    resolution_note = request.form.get('resolution', '').strip()
+    remaining = round(float(order['total']) - float(order.get('refunded_amount', 0)), 2)
+
+    try: refund_amount = round(float(request.form.get('refund_amount') or 0), 2)
+    except ValueError: refund_amount = 0.0
+
+    if decision == 'Full refund': refund_amount = remaining
+    if decision in ['Reject complaint', 'Compensation only', 'Escalate'] and refund_amount != 0:
+        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>This decision should not include a refund amount.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
+    if decision == 'Partial refund' and refund_amount <= 0:
+        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>Partial refund requires a refund amount greater than 0.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
+    if refund_amount < 0 or refund_amount > remaining:
+        return render_template_string(f"{COMMON_STYLE}<div class='card center-card'><div class='danger-box'>Invalid refund amount. Remaining refundable amount is {remaining} EGP.</div><a class='btn btn-secondary' href='/admin/dispute/{ticket_id}'>Back</a></div>")
+
+    ticket['investigation_notes'] = investigation_notes
+    ticket['decision'] = decision
+    ticket['compensation'] = compensation
+    ticket['refund_amount'] = refund_amount
+    ticket['resolution'] = resolution_note
+    ticket['status'] = 'Resolved'
+
+    if refund_amount > 0:
+        order['refunded_amount'] = round(float(order.get('refunded_amount', 0)) + refund_amount, 2)
+        order['payment_status'] = 'Refunded' if order['refunded_amount'] >= float(order['total']) else 'Partially Refunded'
+        ticket.setdefault('refund_history', []).append({"amount": refund_amount, "note": resolution_note, "created_at": timestamp()})
+
+    add_audit(ticket, 'Dispute resolved', f'Decision: {decision}. Refund: {refund_amount} EGP. Compensation: {compensation or "None"}. Notes: {resolution_note}')
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Resolved</div><div class="success-box"><h3 style="color:var(--le-dark);">Dispute workflow completed</h3><p>Ticket <strong>{ticket_id}</strong> stayed linked to Order <strong>{order['order_id']}</strong>.</p><p><strong>Decision:</strong> {decision}</p><p><strong>Refund:</strong> {refund_amount} EGP</p><p><strong>Payment status:</strong> {order['payment_status']}</p></div><a href="/admin/dispute/{ticket_id}" class="btn full-width" style="margin-top:14px;">Back to Ticket</a></div>""")
+
+@app.route('/customer/complaints')
+def customer_complaints():
+    uid = request.args.get('uid', 'C303')
+    name = request.args.get('name', 'Customer')
+    opts = order_options_for_customer(uid)
+    category_opts = "".join([f'<option value="{c}">{c}</option>' for c in COMPLAINT_CATEGORIES])
+    my_tickets = [t for t in complaints_db.values() if t.get('customer_id') == uid]
+    tickets_html = "".join([f"<div class='ticket-card'><strong>{t['ticket_id']}</strong> — Order <strong>{t['order_id']}</strong><br><span class='muted'>{t.get('category','Other')} • {t['subject']} • Status: {t['status']}</span><br><span class='muted'>Decision: {t.get('decision','Pending') or 'Pending'}</span></div>" for t in my_tickets]) or "<div class='empty-state'>No complaint tickets yet.</div>"
+    no_orders = '<div class="danger-box">No completed orders are available for this demo customer.</div>' if not opts else ''
+    submit_disabled = 'disabled' if not opts else ''
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Customer Complaints</h1><div class="muted">Create a complaint ticket linked to a specific Order ID</div></div><a href="/customer?uid={uid}&name={name}" class="btn btn-secondary">Back</a></div><div class="grid-2"><div class="card"><h3>Create Complaint Ticket</h3>{no_orders}<form action="/customer/complaints/create" method="POST"><input type="hidden" name="uid" value="{uid}"><input type="hidden" name="name" value="{name}"><label>Order ID</label><select name="order_id" required>{opts}</select><label>Issue Category</label><select name="category" required>{category_opts}</select><label>Complaint Subject</label><input name="subject" required placeholder="e.g. Missing item"><label>Description</label><textarea name="description" rows="4" required></textarea><button class="btn" type="submit" {submit_disabled}>Submit Complaint</button></form></div><div class="card"><h3>Your Tickets</h3>{tickets_html}</div></div></div>""")
+
+@app.route('/customer/complaints/create', methods=['POST'])
+def customer_complaint_create():
+    uid = request.form.get('uid', '').strip()
+    name = request.form.get('name', 'Customer').strip()
+    order_id = request.form.get('order_id', '').strip()
+    category = request.form.get('category', 'Other').strip()
+    subject = request.form.get('subject', '').strip()
+    description = request.form.get('description', '').strip()
+    order = orders_db.get(order_id)
+    if not order or order.get('customer_id') != uid:
+        return redirect(url_for('customer_complaints', uid=uid, name=name))
+    ticket_id = next_ticket_id()
+    priority = 'High' if category in ['Food quality', 'Payment/refund issue'] else 'Normal'
+    complaints_db[ticket_id] = {"ticket_id": ticket_id, "order_id": order_id, "customer_id": uid, "customer_name": order.get('customer_name', name), "category": category, "subject": subject, "description": description, "status": "Open", "priority": priority, "created_at": timestamp(), "investigation_notes": "", "decision": "", "resolution": "", "refund_amount": 0.0, "compensation": "", "refund_history": [], "audit_log": [{"created_at": timestamp(), "actor": uid, "action": "Complaint created", "note": f"Category: {category}. Subject: {subject}"}]}
+    return render_template_string(f"""{COMMON_STYLE}<div class="card center-card"><div class="logo">Complaint Created</div><div class="success-box"><p>Ticket <strong>{ticket_id}</strong> was created and linked to Order <strong>{order_id}</strong>.</p><p>Status: <strong>Open</strong>. Admin review will move it to <strong>Under Review</strong>.</p></div><a href="/customer/complaints?uid={uid}&name={name}" class="btn full-width">Back to Complaints</a></div>""")
 
 # ─────────────────────────────────────────────
 # VENDOR & DRIVER DASHBOARDS
