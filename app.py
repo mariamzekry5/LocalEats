@@ -332,6 +332,79 @@ def cart_count(uid):
     if not c: return 0
     return sum(it["qty"] for it in c["items"].values())
 
+# ─────────────────────────────────────────────
+# PAYMENT HELPERS — Luhn + Brand detection
+# (FR-26, FR-27 — Sprint 2 simulated payment)
+# ─────────────────────────────────────────────
+def card_digits(card_number):
+    """Strip spaces / dashes; return digit-only string."""
+    return ''.join(c for c in (card_number or '') if c.isdigit())
+
+def luhn_valid(card_number):
+    """
+    Mod-10 (Luhn) check used by virtually every credit-card scheme to
+    detect transcription errors. Returns True if the digits pass.
+    """
+    digits = card_digits(card_number)
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    # Walk from rightmost digit; double every second digit
+    for i, d in enumerate(reversed(digits)):
+        n = int(d)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9: n -= 9
+        total += n
+    return total % 10 == 0
+
+def detect_card_brand(card_number):
+    """
+    Brand detection via Issuer Identification Number (IIN/BIN) ranges.
+    Returns 'Visa', 'Mastercard', or None.
+    """
+    n = card_digits(card_number)
+    if not n: return None
+    # Visa — starts with 4, length 13/16/19
+    if n[0] == '4' and len(n) in (13, 16, 19):
+        return 'Visa'
+    # Mastercard — 51-55 (legacy) OR 2221-2720 (newer 2-series), always 16 digits
+    if len(n) == 16:
+        first2 = int(n[:2])
+        if 51 <= first2 <= 55:
+            return 'Mastercard'
+        if len(n) >= 4:
+            first4 = int(n[:4])
+            if 2221 <= first4 <= 2720:
+                return 'Mastercard'
+    return None
+
+def validate_expiry(mm_yy):
+    """
+    Expects 'MM/YY' or 'MMYY'. Returns (ok, error_message).
+    Ok = the expiry is in the future (last day of month).
+    """
+    s = (mm_yy or '').replace('/', '').replace(' ', '')
+    if not s.isdigit() or len(s) != 4:
+        return False, "Expiry must be in MM/YY format."
+    mm, yy = int(s[:2]), int(s[2:])
+    if mm < 1 or mm > 12:
+        return False, "Expiry month must be 01–12."
+    # Treat YY as 20YY
+    now = datetime.now()
+    exp_year = 2000 + yy
+    # Valid through the last day of the expiry month
+    if (exp_year, mm) < (now.year, now.month):
+        return False, "Card has expired."
+    return True, ""
+
+def validate_cvv(cvv, brand):
+    """CVV: Visa/Mastercard = 3 digits."""
+    s = (cvv or '').strip()
+    if not s.isdigit():
+        return False
+    return len(s) == 3
+
 def render_file_preview(filename):
     ext, file_url = file_extension(filename), url_for('uploaded_file', filename=filename)
     if ext == 'pdf': return f'<div class="preview-box"><iframe src="{file_url}" class="preview-frame"></iframe></div>'
@@ -1171,7 +1244,7 @@ def view_cart():
         img_html = f'<img src="/uploads/{it["image"]}" class="cart-line-img" alt="{it["name"]}">' if it.get("image") else '<div class="cart-line-img-placeholder">🍽️</div>'
         lines_html += f"""<div class="cart-line">{img_html}<div class="cart-line-info"><div class="cart-line-name">{it['name']}</div><div class="cart-line-price">{it['price']} EGP each</div></div><form class="cart-qty-form" action="/cart/update" method="POST"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><input type="hidden" name="item_id" value="{iid}"><input type="number" name="qty" value="{it['qty']}" min="1" max="99"><button type="submit" class="btn btn-sm btn-outline">Update</button></form><div class="cart-line-total">{line_total} EGP</div><form action="/cart/remove" method="POST" style="margin:0;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><input type="hidden" name="item_id" value="{iid}"><button type="submit" class="btn btn-sm btn-danger">Remove</button></form></div>"""
     subtotal, tax, delivery_fee, total = cart_totals(cart)
-    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1><div class="muted">Ordering from <strong>{vendor_name}</strong> &nbsp;•&nbsp; User ID: {uid}</div></div><a href="{back_url}" class="btn btn-secondary">Continue Shopping</a></div>{msg_html}{err_html}<div class="grid-2"><div class="card"><h3 style="margin-bottom:10px;">Items</h3>{lines_html}<form action="/cart/clear" method="POST" style="margin-top:16px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn btn-sm btn-secondary">Clear Cart</button></form></div><div class="card"><h3 style="margin-bottom:14px;">Order Summary</h3><div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div><div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div><div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div><div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div><a href="/restaurant/{vendor_name}?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:14px;">Add More Items</a><form action="/checkout" method="POST" style="margin-top:10px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn full-width">Proceed to Checkout</button></form></div></div></div>""")
+    return render_template_string(f"""{COMMON_STYLE}<div class="page"><div class="topbar"><div class="topbar-left"><h1 style="color:var(--le-dark);margin-bottom:4px;">Your Cart</h1><div class="muted">Ordering from <strong>{vendor_name}</strong> &nbsp;•&nbsp; User ID: {uid}</div></div><a href="{back_url}" class="btn btn-secondary">Continue Shopping</a></div>{msg_html}{err_html}<div class="grid-2"><div class="card"><h3 style="margin-bottom:10px;">Items</h3>{lines_html}<form action="/cart/clear" method="POST" style="margin-top:16px;"><input type="hidden" name="cuid" value="{uid}"><input type="hidden" name="cname" value="{name}"><button type="submit" class="btn btn-sm btn-secondary">Clear Cart</button></form></div><div class="card"><h3 style="margin-bottom:14px;">Order Summary</h3><div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div><div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div><div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div><div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div><a href="/restaurant/{vendor_name}?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:14px;">Add More Items</a><a href="/checkout/payment?cuid={uid}&cname={name}" class="btn full-width" style="margin-top:10px;">Proceed to Checkout</a></div></div></div>""")
 
 @app.route('/cart/add', methods=['POST'])
 def cart_add():
@@ -1241,17 +1314,204 @@ def cart_clear():
 # STORY 3 — CHECKOUT (places order, sends to vendor)
 # AC-1: Order surfaces on vendor dashboard immediately
 # AC-3: Customer sees confirmation with ETA
+# Sprint 2: Now collects + validates simulated payment
+#           (FR-26 Card / Cash on Delivery / Apple Pay)
 # ─────────────────────────────────────────────
+
+@app.route('/checkout/payment', methods=['GET'])
+def checkout_payment():
+    """
+    Sprint 2 — Step 1 of checkout: render payment form.
+    Validates Luhn checksum and detects card brand (Visa / Mastercard).
+    """
+    cuid = request.args.get('cuid', '').strip()
+    cname = request.args.get('cname', 'Customer').strip()
+    err = request.args.get('err', '')
+
+    if cuid not in users_db or users_db[cuid].get("role") != "Customer":
+        return redirect(url_for('login_page', err='Please log in as a customer.'))
+    cart = carts.get(cuid)
+    if not cart or not cart.get("items"):
+        return redirect(url_for('view_cart', uid=cuid, name=cname, err='Your cart is empty.'))
+
+    vendor_name = cart["vendor"]
+    subtotal, tax, delivery_fee, total = cart_totals(cart)
+    items_lines = "".join([
+        f'<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;">'
+        f'<span>{it["qty"]}× {it["name"]}</span>'
+        f'<span>{round(float(it["price"])*it["qty"],2)} EGP</span></div>'
+        for it in cart["items"].values()
+    ])
+    err_html = f'<div class="danger-box" style="margin-bottom:14px;">{err}</div>' if err else ''
+
+    return render_template_string(f"""{COMMON_STYLE}
+<style>
+.pay-method-row{{display:flex;gap:10px;margin:14px 0 18px;flex-wrap:wrap;}}
+.pay-option{{flex:1;min-width:120px;border:2px solid var(--border);border-radius:12px;padding:14px 12px;cursor:pointer;text-align:center;transition:all .15s;background:white;}}
+.pay-option:hover{{border-color:var(--le-green);}}
+.pay-option input[type=radio]{{display:none;}}
+.pay-option.selected{{border-color:var(--le-green);background:var(--le-light);}}
+.pay-icon{{font-size:24px;display:block;margin-bottom:6px;}}
+.card-fields{{display:none;}}
+.card-fields.visible{{display:block;}}
+.card-row{{display:flex;gap:12px;}}
+.card-row > div{{flex:1;}}
+.brand-input-wrap{{position:relative;}}
+.brand-badge{{position:absolute;right:14px;top:50%;transform:translateY(-50%);padding:4px 10px;border-radius:6px;font-size:11px;font-weight:800;letter-spacing:.5px;background:#eee;color:#666;}}
+.brand-badge.visa{{background:#1a1f71;color:white;}}
+.brand-badge.mastercard{{background:linear-gradient(90deg,#eb001b 0%,#eb001b 50%,#f79e1b 50%,#f79e1b 100%);color:white;}}
+.brand-badge.invalid{{background:#ffe0e0;color:#c62828;}}
+</style>
+<div class="page" style="max-width:900px;">
+    <div class="topbar">
+        <div class="topbar-left">
+            <h1 style="color:var(--le-dark);margin-bottom:4px;">Checkout</h1>
+            <div class="muted">Ordering from <strong>{vendor_name}</strong></div>
+        </div>
+        <a href="/cart?uid={cuid}&name={cname}" class="btn btn-secondary">Back to Cart</a>
+    </div>
+    {err_html}
+    <div class="grid-2">
+        <div class="card">
+            <h3 style="margin-bottom:6px;">Payment Method</h3>
+            <p class="muted" style="font-size:12px;margin:0 0 4px;">All payments are simulated for the MVP — no real charges occur.</p>
+            <form action="/checkout" method="POST" id="payform">
+                <input type="hidden" name="cuid" value="{cuid}">
+                <input type="hidden" name="cname" value="{cname}">
+
+                <div class="pay-method-row">
+                    <label class="pay-option selected" data-method="card">
+                        <input type="radio" name="payment_method" value="card" checked>
+                        <span class="pay-icon">💳</span><div>Credit / Debit Card</div>
+                    </label>
+                    <label class="pay-option" data-method="cod">
+                        <input type="radio" name="payment_method" value="cod">
+                        <span class="pay-icon">💵</span><div>Cash on Delivery</div>
+                    </label>
+                    <label class="pay-option" data-method="apple_pay">
+                        <input type="radio" name="payment_method" value="apple_pay">
+                        <span class="pay-icon"></span><div>Apple Pay</div>
+                    </label>
+                </div>
+
+                <div class="card-fields visible" id="card-fields">
+                    <label>Cardholder Name</label>
+                    <input type="text" name="cardholder_name" placeholder="As printed on the card" autocomplete="cc-name">
+
+                    <label>Card Number</label>
+                    <div class="brand-input-wrap">
+                        <input type="text" name="card_number" id="card-number" placeholder="0000 0000 0000 0000" autocomplete="cc-number" maxlength="23" inputmode="numeric">
+                        <span class="brand-badge" id="brand-badge">CARD</span>
+                    </div>
+
+                    <div class="card-row">
+                        <div>
+                            <label>Expiry (MM/YY)</label>
+                            <input type="text" name="expiry" placeholder="MM/YY" maxlength="5" autocomplete="cc-exp" inputmode="numeric">
+                        </div>
+                        <div>
+                            <label>CVV</label>
+                            <input type="password" name="cvv" placeholder="3 digits" maxlength="4" autocomplete="cc-csc" inputmode="numeric">
+                        </div>
+                    </div>
+
+                    <p style="font-size:11px;color:var(--muted);margin-top:6px;">
+                        Test cards: 4111 1111 1111 1111 (Visa) · 5555 5555 5555 4444 (Mastercard).
+                        We use the Luhn algorithm to detect typos.
+                    </p>
+                </div>
+
+                <button type="submit" class="btn full-width" style="margin-top:14px;">Place Order — {total} EGP</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-bottom:14px;">Order Summary</h3>
+            <div style="border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:8px;">
+                {items_lines}
+            </div>
+            <div class="totals-row"><span>Subtotal</span><span>{subtotal} EGP</span></div>
+            <div class="totals-row"><span>VAT (14%)</span><span>{tax} EGP</span></div>
+            <div class="totals-row"><span>Delivery Fee</span><span>{delivery_fee} EGP</span></div>
+            <div class="totals-row grand"><span>Total</span><span>{total} EGP</span></div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Toggle card fields visibility based on payment method
+document.querySelectorAll('.pay-option').forEach(opt => {{
+    opt.addEventListener('click', () => {{
+        document.querySelectorAll('.pay-option').forEach(o => o.classList.remove('selected'));
+        opt.classList.add('selected');
+        const method = opt.dataset.method;
+        document.getElementById('card-fields').classList.toggle('visible', method === 'card');
+    }});
+}});
+
+// Live card brand detection + format spacing while typing
+const cardInput = document.getElementById('card-number');
+const badge = document.getElementById('brand-badge');
+
+function detectBrand(num) {{
+    const n = num.replace(/\\D/g, '');
+    if (!n) return null;
+    if (n[0] === '4' && [13,16,19].includes(n.length)) return 'Visa';
+    if (n.length === 16) {{
+        const first2 = parseInt(n.slice(0,2));
+        if (first2 >= 51 && first2 <= 55) return 'Mastercard';
+        const first4 = parseInt(n.slice(0,4));
+        if (first4 >= 2221 && first4 <= 2720) return 'Mastercard';
+    }}
+    return null;
+}}
+function luhn(num) {{
+    const n = num.replace(/\\D/g, '');
+    if (n.length < 13 || n.length > 19) return false;
+    let total = 0;
+    for (let i = n.length - 1, j = 0; i >= 0; i--, j++) {{
+        let d = parseInt(n[i]);
+        if (j % 2 === 1) {{ d *= 2; if (d > 9) d -= 9; }}
+        total += d;
+    }}
+    return total % 10 === 0;
+}}
+function updateBrand() {{
+    const raw = cardInput.value.replace(/\\D/g, '');
+    // Format as groups of 4
+    cardInput.value = raw.replace(/(.{{4}})/g, '$1 ').trim();
+    badge.classList.remove('visa','mastercard','invalid');
+    badge.textContent = 'CARD';
+    if (!raw) return;
+    const brand = detectBrand(raw);
+    if (brand === 'Visa') {{ badge.classList.add('visa'); badge.textContent = 'VISA'; }}
+    else if (brand === 'Mastercard') {{ badge.classList.add('mastercard'); badge.textContent = 'MASTERCARD'; }}
+    else if (raw.length >= 13) {{ badge.classList.add('invalid'); badge.textContent = 'UNKNOWN'; }}
+    // Luhn hint after a full-length entry
+    if (raw.length >= 13 && !luhn(raw)) {{ badge.classList.remove('visa','mastercard'); badge.classList.add('invalid'); badge.textContent = 'CHECK #'; }}
+}}
+cardInput.addEventListener('input', updateBrand);
+
+// Auto-format expiry MM/YY
+const expInput = document.querySelector('input[name="expiry"]');
+expInput.addEventListener('input', e => {{
+    let v = e.target.value.replace(/\\D/g, '').slice(0,4);
+    if (v.length >= 3) v = v.slice(0,2) + '/' + v.slice(2);
+    e.target.value = v;
+}});
+</script>
+""")
+
 
 @app.route('/checkout', methods=['POST'])
 def checkout():
     """
     Story 3, AC-1: Creates order with status 'Pending Vendor Acceptance'.
-    The vendor sees it immediately on their dashboard.
-    Story 3, AC-3: Customer receives order confirmation page with ETA.
+    Sprint 2: Validates simulated payment first (Luhn + brand detection).
     """
     cuid  = request.form.get('cuid', '').strip()
     cname = request.form.get('cname', 'Customer').strip()
+    payment_method = request.form.get('payment_method', '').strip().lower()
 
     if cuid not in users_db or users_db[cuid].get("role") != "Customer":
         return redirect(url_for('login_page', err='Please log in as a customer.'))
@@ -1259,6 +1519,50 @@ def checkout():
     cart = carts.get(cuid)
     if not cart or not cart.get("items"):
         return redirect(url_for('view_cart', uid=cuid, name=cname, err='Your cart is empty.'))
+
+    if payment_method not in ('card', 'cod', 'apple_pay'):
+        return redirect(url_for('checkout_payment', cuid=cuid, cname=cname,
+                                err='Please select a valid payment method.'))
+
+    payment_summary = ""
+    card_brand = None
+    card_last4 = None
+
+    # ── Card path: full Luhn + brand + expiry + CVV validation ─────────
+    if payment_method == 'card':
+        card_number   = request.form.get('card_number', '')
+        cardholder    = request.form.get('cardholder_name', '').strip()
+        expiry        = request.form.get('expiry', '').strip()
+        cvv           = request.form.get('cvv', '').strip()
+
+        if not cardholder:
+            return redirect(url_for('checkout_payment', cuid=cuid, cname=cname,
+                                    err='Cardholder name is required.'))
+
+        digits = card_digits(card_number)
+        card_brand = detect_card_brand(digits)
+        if card_brand is None:
+            return redirect(url_for('checkout_payment', cuid=cuid, cname=cname,
+                                    err='Card brand not recognised. We accept Visa and Mastercard.'))
+        if not luhn_valid(digits):
+            return redirect(url_for('checkout_payment', cuid=cuid, cname=cname,
+                                    err='Card number is invalid (Luhn check failed). Please re-enter.'))
+
+        ok, exp_err = validate_expiry(expiry)
+        if not ok:
+            return redirect(url_for('checkout_payment', cuid=cuid, cname=cname, err=exp_err))
+
+        if not validate_cvv(cvv, card_brand):
+            return redirect(url_for('checkout_payment', cuid=cuid, cname=cname,
+                                    err='CVV must be 3 digits.'))
+
+        card_last4 = digits[-4:]
+        payment_summary = f"{card_brand} •••• {card_last4}"
+
+    elif payment_method == 'cod':
+        payment_summary = "Cash on Delivery"
+    elif payment_method == 'apple_pay':
+        payment_summary = "Apple Pay (simulated)"
 
     vendor_name = cart["vendor"]
     subtotal, tax, delivery_fee, total = cart_totals(cart)
@@ -1284,6 +1588,12 @@ def checkout():
         "total_egp":      total,
         "rejection_reason": None,
         "rejected_at":    None,
+        # ── Sprint 2: Payment fields ────────────────────────────────
+        "payment_method":  payment_method,
+        "payment_summary": payment_summary,
+        "card_brand":      card_brand,
+        "card_last4":      card_last4,
+        "payment_status":  "Authorised (simulated)" if payment_method != 'cod' else "Pending — collected on delivery",
     }
 
     # Clear cart after placing order
@@ -1314,6 +1624,12 @@ def checkout():
                 <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:800;color:var(--le-dark);border-top:1px solid #ddd;margin-top:8px;padding-top:8px;">
                     <span>Total</span><span>{total} EGP</span>
                 </div>
+            </div>
+
+            <div style="background:#eef5ff;border:1px solid #b6d4ff;border-radius:10px;padding:14px;margin-top:12px;text-align:left;">
+                <div style="font-size:13px;color:#0d47a1;font-weight:600;">💳 Payment</div>
+                <div style="font-size:13px;color:#333;margin-top:4px;"><strong>{payment_summary}</strong></div>
+                <div style="font-size:12px;color:#555;margin-top:2px;">{orders_db[new_oid]['payment_status']}</div>
             </div>
 
             <div style="background:#e8f5e9;border:1px solid #a5d6a7;border-radius:10px;padding:14px;margin-top:12px;">
