@@ -273,7 +273,32 @@ th{color:#333;background:#fafcfa;font-size:13px;text-transform:uppercase;letter-
 .rejection-banner{background:#fff5f5;border:2px solid #ffcdd2;border-radius:14px;padding:16px 20px;margin-top:10px;}
 .awaiting-banner{background:#fffde7;border:2px solid #fff176;border-radius:14px;padding:16px 20px;margin-top:10px;}
 
-@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}}
+/* ── Story 8: Order Tracking ───────────────────────────────── */
+.track-steps{display:flex;justify-content:space-between;align-items:flex-start;position:relative;margin:28px 0 36px;}
+.track-steps::before{content:'';position:absolute;top:20px;left:10%;right:10%;height:3px;background:#e0e0e0;z-index:0;}
+.track-step{display:flex;flex-direction:column;align-items:center;flex:1;z-index:1;gap:10px;}
+.track-step-circle{width:42px;height:42px;border-radius:50%;background:#e0e0e0;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:800;color:#999;border:3px solid #e0e0e0;transition:all .3s;}
+.track-step-circle.done{background:var(--le-green);border-color:var(--le-green);color:white;}
+.track-step-circle.active{background:white;border-color:var(--le-green);color:var(--le-green);box-shadow:0 0 0 4px #c8e6c9;}
+.track-step-label{font-size:12px;color:#999;font-weight:600;text-align:center;text-transform:uppercase;letter-spacing:.3px;}
+.track-step-label.done,.track-step-label.active{color:var(--le-dark);}
+.track-step-time{font-size:11px;color:var(--muted);text-align:center;}
+.track-info-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px;}
+.track-info-box{background:#f8faf9;border:1px solid var(--border);border-radius:12px;padding:14px;}
+.track-info-box .label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px;}
+.track-info-box .value{font-size:15px;font-weight:700;color:var(--le-dark);}
+.map-placeholder{background:linear-gradient(135deg,#e8f5e9 0%,#f1f8e9 50%,#e0f2f1 100%);border:2px solid #a5d6a7;border-radius:16px;height:260px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;position:relative;overflow:hidden;}
+.map-placeholder .map-pin{font-size:42px;animation:bounce 1.2s infinite;}
+@keyframes bounce{0%,100%{transform:translateY(0);}50%{transform:translateY(-10px);}}
+.map-road{position:absolute;bottom:40px;left:0;right:0;height:8px;background:rgba(255,255,255,0.6);border-radius:4px;}
+.map-road::after{content:'';position:absolute;top:2px;left:5%;width:15%;height:4px;background:rgba(46,125,50,0.4);border-radius:2px;animation:car 3s linear infinite;}
+@keyframes car{0%{left:5%;}100%{left:80%;}}
+.track-status-banner{border-radius:14px;padding:16px 20px;margin-bottom:20px;}
+.track-status-banner.pending{background:#fffde7;border:2px solid #fff176;}
+.track-status-banner.confirmed{background:#e8f5e9;border:2px solid #a5d6a7;}
+.track-status-banner.rejected{background:#fff5f5;border:2px solid #ffcdd2;}
+.track-status-banner.delivered{background:#f3e5f5;border:2px solid #ce93d8;}
+@media (max-width:900px){.grid-2,.stats{grid-template-columns:1fr;}.topbar,.browse-wrap,.menu-wrap{flex-direction:column;align-items:flex-start;} table{font-size:13px;} .browse-sidebar,.menu-sidebar{width:100%;}.track-info-grid{grid-template-columns:1fr;}.track-steps::before{left:5%;right:5%;}}
 </style>
 """
 
@@ -835,7 +860,11 @@ def customer_orders():
         cards += f"""
         <div class="order-card">
             <div class="order-card-info">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+                    <h3 style="margin:0;">{oid}</h3>
+                    <span class="badge {badge_cls}">{status}</span>
+                    <a href="/customer/track/{oid}?uid={uid}&name={name}" class="btn btn-sm btn-outline" style="margin-left:auto;">📍 Track Order</a>
+                </div>
                     <h3 style="margin:0;">{oid}</h3>
                     <span class="badge {badge_cls}">{status}</span>
                 </div>
@@ -1582,6 +1611,191 @@ def driver_update_order(order_id):
             order["delivered_at"] = timestamp()
     return redirect(url_for('driver_dashboard', uid=uid, name=name))
 
+@app.route('/customer/track/<order_id>')
+def customer_track_order(order_id):
+    uid  = request.args.get('uid', '')
+    name = request.args.get('name', 'Customer')
+
+    order = orders_db.get(order_id)
+    if not order:
+        return redirect(url_for('customer_orders', uid=uid, name=name,
+                                err=f'Order {order_id} not found.'))
+    if order.get('customer_uid') != uid:
+        return redirect(url_for('customer_orders', uid=uid, name=name,
+                                err='You do not have permission to track this order.'))
+
+    status   = order.get('status', '')
+    vendor   = order.get('pickup', 'Restaurant')
+    dropoff  = order.get('dropoff', 'Your address')
+    items    = order.get('items', '—')
+    eta      = order.get('estimated_time', '—')
+    placed   = order.get('placed_at', '—')
+    accepted = order.get('accepted_at', '—')
+    delivered_at = order.get('delivered_at', '')
+
+
+    STEP_LABELS = ["Preparing", "Picked Up", "On the Way", "Delivered"]
+    STEP_ICONS  = ["🍳", "📦", "🛵", "✅"]
+
+    STATUS_TO_STEP = {
+        "Pending Vendor Acceptance": -1,   # before any step
+        "Rejected by Vendor":        -2,   # error state
+        "Ready for Driver":           0,   # Preparing (vendor done, awaiting driver)
+        "Accepted":                   0,   # still Preparing
+        "Picked Up":                  1,
+        "On the Way":                 2,
+        "Delivered":                  3,
+    }
+    current_step = STATUS_TO_STEP.get(status, -1)
+
+    if status == "Pending Vendor Acceptance":
+        mins_left = minutes_remaining(order.get('placed_at', ''))
+        banner = f"""<div class="track-status-banner pending">
+            <div style="font-weight:700;font-size:15px;color:#f57f17;">⏳ Waiting for restaurant to confirm…</div>
+            <div style="font-size:13px;color:#795548;margin-top:6px;">
+                <strong>{vendor}</strong> has <strong>{int(mins_left)} min</strong> remaining to accept your order.
+                This page refreshes automatically.
+            </div>
+        </div>"""
+    elif status == "Rejected by Vendor":
+        reason = order.get('rejection_reason', 'The restaurant was unable to accept your order.')
+        banner = f"""<div class="track-status-banner rejected">
+            <div style="font-weight:700;font-size:15px;color:#c62828;">❌ Order Not Accepted</div>
+            <div style="font-size:13px;color:#c62828;margin-top:6px;">{reason}</div>
+        </div>"""
+    elif status == "Delivered":
+        banner = f"""<div class="track-status-banner delivered">
+            <div style="font-weight:700;font-size:15px;color:#6a1b9a;">🎉 Order Delivered!</div>
+            <div style="font-size:13px;color:#6a1b9a;margin-top:6px;">
+                Your order arrived at <strong>{delivered_at}</strong>. Enjoy your meal!
+            </div>
+        </div>"""
+    else:
+        status_msgs = {
+            "Ready for Driver": ("🍳 Preparing your order", "#1b5e20", "The restaurant has accepted and is preparing your food."),
+            "Accepted":         ("🍳 Preparing your order", "#1b5e20", "A driver has been assigned and your food is being prepared."),
+            "Picked Up":        ("📦 Order Picked Up",      "#0d47a1", "Your driver has collected the order from the restaurant."),
+            "On the Way":       ("🛵 On the Way!",          "#e65100", "Your driver is heading to your address right now."),
+        }
+        icon_text, color, desc = status_msgs.get(status, ("📋 Processing", "#555", "Your order is being processed."))
+        banner = f"""<div class="track-status-banner confirmed">
+            <div style="font-weight:700;font-size:15px;color:{color};">{icon_text}</div>
+            <div style="font-size:13px;color:#2e7d32;margin-top:6px;">{desc}</div>
+            {f'<div style="margin-top:10px;"><span style="background:#2e7d32;color:white;border-radius:999px;padding:4px 14px;font-size:12px;font-weight:700;">🕐 Estimated delivery: {eta} mins</span></div>' if status not in ("Delivered", "Rejected by Vendor") else ''}
+        </div>"""
+
+    steps_html = ""
+    for i, (label, icon) in enumerate(zip(STEP_LABELS, STEP_ICONS)):
+        if current_step < 0:
+            circle_cls = label_cls = ""
+        elif i < current_step:
+            circle_cls = label_cls = "done"
+        elif i == current_step:
+            circle_cls = label_cls = "active"
+        else:
+            circle_cls = label_cls = ""
+
+        time_label = ""
+        if label == "Preparing"  and accepted and accepted != "—":
+            time_label = accepted
+        elif label == "Delivered" and delivered_at:
+            time_label = delivered_at
+
+        steps_html += f"""<div class="track-step">
+            <div class="track-step-circle {circle_cls}">{icon if circle_cls in ("done","active") else str(i+1)}</div>
+            <div class="track-step-label {label_cls}">{label}</div>
+            {f'<div class="track-step-time">{time_label}</div>' if time_label else ''}
+        </div>"""
+
+    progress_section = ""
+    if current_step >= 0:
+        progress_section = f"""<div class="card">
+            <h3 style="margin-bottom:4px;">Order Progress</h3>
+            <p class="muted" style="font-size:13px;margin-top:0;">Status updates as your order moves through each stage.</p>
+            <div class="track-steps">{steps_html}</div>
+        </div>"""
+
+    map_section = ""
+    if status == "On the Way":
+        map_section = f"""<div class="card">
+            <h3>🗺 Live Driver Location</h3>
+            <p class="muted" style="font-size:13px;margin-top:0;">Your driver is on the way — estimated arrival in <strong>{eta} mins</strong>.</p>
+            <div class="map-placeholder">
+                <div class="map-road"></div>
+                <div class="map-pin">🛵</div>
+                <div style="font-size:14px;font-weight:700;color:var(--le-dark);text-align:center;">Driver en route to your address</div>
+                <div style="font-size:12px;color:var(--muted);text-align:center;">📍 {dropoff}</div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);margin-top:10px;text-align:center;">
+                Live map auto-refreshes every 15 seconds
+            </div>
+        </div>"""
+    elif status == "Picked Up":
+        map_section = f"""<div class="card">
+            <h3>🗺 Driver Status</h3>
+            <div style="background:#e3f2fd;border:1px solid #90caf9;border-radius:12px;padding:16px;text-align:center;">
+                <div style="font-size:32px;">📦</div>
+                <div style="font-weight:700;color:#0d47a1;margin-top:8px;">Order Collected</div>
+                <div style="font-size:13px;color:#1565c0;margin-top:4px;">Your driver has the order and will be on the way shortly. The live map will appear once they start heading to you.</div>
+            </div>
+        </div>"""
+
+    driver_uid = order.get('driver_uid')
+    driver_name = users_db.get(driver_uid, {}).get('name', 'Not yet assigned') if driver_uid else 'Not yet assigned'
+
+    details_section = f"""<div class="card">
+        <h3>Order Details</h3>
+        <div class="track-info-grid">
+            <div class="track-info-box"><div class="label">Order ID</div><div class="value">{order_id}</div></div>
+            <div class="track-info-box"><div class="label">Restaurant</div><div class="value">{vendor}</div></div>
+            <div class="track-info-box"><div class="label">Items</div><div class="value" style="font-size:13px;font-weight:600;">{items}</div></div>
+            <div class="track-info-box"><div class="label">Delivery Address</div><div class="value" style="font-size:13px;">{dropoff}</div></div>
+            <div class="track-info-box"><div class="label">Driver</div><div class="value">{driver_name}</div></div>
+            <div class="track-info-box"><div class="label">Placed At</div><div class="value" style="font-size:13px;">{placed}</div></div>
+        </div>
+    </div>"""
+
+
+    auto_refresh = ""
+    if status not in ("Delivered", "Rejected by Vendor"):
+        interval = 15000 if status == "On the Way" else 20000
+        auto_refresh = f"""<script>
+            setTimeout(function() {{ window.location.reload(); }}, {interval});
+        </script>"""
+
+    post_delivery_html = ""
+    if status == "Delivered":
+        existing_review = reviews_db.get(order_id)
+        if not existing_review:
+            post_delivery_html += f'<a href="/customer/review/{order_id}?uid={uid}&name={name}" class="btn btn-outline" style="margin-top:8px;">⭐ Leave a Review</a>&nbsp;'
+        existing_ticket = next((t for t in complaint_tickets_db.values() if t["order_id"] == order_id and t["customer_uid"] == uid), None)
+        if not existing_ticket:
+            if delivered_at:
+                try:
+                    delta = (datetime.now() - parse_timestamp(delivered_at)).total_seconds()
+                    if delta < COMPLAINT_WINDOW_HOURS * 3600:
+                        post_delivery_html += f'<a href="/customer/complaint?uid={uid}&name={name}&order_id={order_id}" class="btn btn-danger" style="margin-top:8px;">⚠️ Report Issue</a>'
+                except Exception:
+                    pass
+        if post_delivery_html:
+            post_delivery_html = f'<div class="card" style="padding:16px 24px;">{post_delivery_html}</div>'
+
+    return render_template_string(f"""{COMMON_STYLE}
+    <div class="page">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h1 style="color:var(--le-dark);margin-bottom:4px;">Track Order — {order_id}</h1>
+                <div class="muted">From <strong>{vendor}</strong> &nbsp;•&nbsp; Customer: {name}</div>
+            </div>
+            <a href="/customer/orders?uid={uid}&name={name}" class="btn btn-secondary">← My Orders</a>
+        </div>
+        {banner}
+        {progress_section}
+        {map_section}
+        {details_section}
+        {post_delivery_html}
+    </div>
+    {auto_refresh}""")
 
 def open_browser(): webbrowser.open_new("http://127.0.0.1:5000")
 
